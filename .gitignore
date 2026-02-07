@@ -1,3 +1,18 @@
+build
+tskit-1.0.0
+packagecache
+
+*.bin
+
+.vscode
+.ipynb_checkpoints
+
+.DS_store
+
+sandbox
+sim
+
+
 # Prerequisites
 *.d
 
@@ -39,3 +54,9 @@
 
 # debug information files
 *.dwo
+
+# notebooks
+*.ipynb
+
+# data
+*.arg
