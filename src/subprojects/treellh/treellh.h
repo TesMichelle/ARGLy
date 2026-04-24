@@ -1,5 +1,6 @@
 #include <vector>
 #include <span>
+#include <mdspan>
 #include <map>
 #include <cmath>
 #include <algorithm>
@@ -31,6 +32,7 @@ namespace treellh
     {
         private:
             const tsk_treeseq_t &ts_;
+            std::vector<int> sample_population_;
 
             std::vector<bool> is_fixed_;
             std::vector<int> population_;
@@ -60,7 +62,7 @@ namespace treellh
             int ghost_pop_index_ = 1;
             int outgroup_pop_index_ = 2;
         public:
-            Scenario_Computer(const tsk_treeseq_t&, std::span<const double>, int, int);
+            Scenario_Computer(const tsk_treeseq_t&, std::span<const double>, const std::vector<int>&, int, int);
 
             int compute_lower_nodes_split_1(const tsk_tree_t&);
             int compute_fixed_nodes(const tsk_tree_t&);
@@ -76,11 +78,17 @@ namespace treellh
             int check_scenario(const tsk_tree_t&);
             int check_imposible_split_2(const tsk_tree_t&);
 
+            double find_lowest_coal(const tsk_tree_t&, std::span<const tsk_id_t>, std::span<const tsk_id_t>);
+
             int sort_by_time(const tsk_tree_t&);
             int debug_sort_by_time(const tsk_tree_t&);
 
             double smart_llh(const tsk_tree_t &, double, double, 
                 std::span<const int>, std::span<int>);
+            double smart_llh_to_nodes(const tsk_tree_t &, double, double, 
+                std::span<const int>, std::span<int>, std::span<double>, std::span<int>, std::span<int>);
+
+            std::vector<std::vector<double>> compute_grid_fast(const tsk_tree_t &, std::vector<double>, std::vector<double>);
 
             double compute_llh(const tsk_tree_t&);
 

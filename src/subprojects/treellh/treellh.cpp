@@ -86,13 +86,27 @@ namespace treellh
         return result;
     }
 
+
+
+
+
+
+
+
+
+
+
     // Scenario_Computer implementation
 
     Scenario_Computer::Scenario_Computer(
-        const tsk_treeseq_t& ts, std::span<const double> parameters, int admixed_data_index, int outgroup_data_index) : ts_(ts)
+        const tsk_treeseq_t& ts, std::span<const double> parameters, 
+        const std::vector<int>& sample_population,
+        int admixed_data_index, int outgroup_data_index
+    ) : ts_(ts)
     {
+        sample_population_ = sample_population;
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts);
-        is_fixed_ = std::vector<bool>(number_of_nodes, 0); 
+        is_fixed_ = std::vector<bool>(number_of_nodes, 0);
         population_ = std::vector<int>(number_of_nodes, -1);
 
         set_parameters(parameters);
@@ -143,7 +157,7 @@ namespace treellh
         for (tsk_size_t i = 0; i < samples_num; i++)
         {
             // for each sample from outgroup we mark parents until first (ancient) split. 
-            if (tree.tree_sequence->tables->nodes.population[samples[i]] == outgroup_data_index_)// Outgroup 
+            if (sample_population_[samples[i]] == outgroup_data_index_)// Outgroup 
             {
                 node = samples[i];   
                 while ( 
@@ -215,7 +229,7 @@ namespace treellh
         {
             node = stack.back(); // removes last element
             time = tree.tree_sequence->tables->nodes.time[node];
-            if ((population_[node] != outgroup_pop_index_) && (time > end_time))
+            if ((population_[node] != outgroup_pop_index_) && (time >= end_time))
                 population_[node] = population_id;
             c++;
             stack.pop_back();
@@ -223,13 +237,13 @@ namespace treellh
             for (child = tree.left_child[node]; child != TSK_NULL; child = tree.right_sib[child])
             {
                 double child_time = tree.tree_sequence->tables->nodes.time[child];
-                if ((child_time > end_time) && (population_[child] != outgroup_pop_index_))
+                if ((child_time >= end_time) && (population_[child] != outgroup_pop_index_))
                 {
                     stack.push_back(child);
                 }
                 else if (
                     (population_id == ghost_pop_index_) && 
-                    (child_time <= end_time) && 
+                    (child_time < end_time) && 
                     (population_[child] != outgroup_pop_index_))
                 {
                     c += set_subtree_population(tree, child, base_pop_index_, 0);
@@ -246,12 +260,10 @@ namespace treellh
         
         sc_lineages_num_[0] = 0;
         sc_lineages_num_[1] = 0;
-        // std::cout << "scenario: " << scenario_id << std::endl;
         for (tsk_id_t id : lower_nodes_split_1_)
         {
             if (is_fixed_[id] == false)
             {
-                // std::cout << scenario_id%2;
                 if ((scenario_id%2 == 0) && (population_[id] != base_pop_index_))
                 {
                     set_subtree_population(tree, id, base_pop_index_, 0);
@@ -272,7 +284,6 @@ namespace treellh
                 sc_lineages_num_[0] += 1;
             }
         }
-        // std::cout << std::endl;
         return sc_lineages_num_[0];
     }
 
@@ -298,7 +309,7 @@ namespace treellh
         for (tsk_size_t i = 0; i < samples_num; i++)
         {
             // for each sample from outgroup we mark parents until second (early) split. 
-            if (tree.tree_sequence->tables->nodes.population[samples[i]] == admixed_data_index_)// Admixed 
+            if (sample_population_[samples[i]] == admixed_data_index_)// Admixed 
             {
                 node = samples[i];   
                 while ( 
@@ -317,6 +328,49 @@ namespace treellh
             }
         }
         return 0;   
+    }
+
+
+    double Scenario_Computer::find_lowest_coal(const tsk_tree_t& tree, std::span<const tsk_id_t> A, std::span<const tsk_id_t> B)
+    {
+        tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
+        std::vector<bool> flag_A(number_of_nodes, 0);
+        std::vector<bool> flag_B(number_of_nodes, 0);
+        // get samples from ts object
+
+        for (tsk_id_t node : A)
+        {
+            // for each sample from outgroup we mark parents until second (early) split. 
+            while ( 
+                (node != TSK_NULL) &&
+                (tree.tree_sequence->tables->nodes.time[node] < split_2_time_) &&
+                (flag_A[node] == 0)
+            )
+            {
+                flag_A[node] = 1;
+                node = tree.parent[node];
+            }
+        }
+
+        double time = split_2_time_;
+        for (tsk_id_t node : B)
+        {
+            while ( 
+                (node != TSK_NULL) &&
+                (tree.tree_sequence->tables->nodes.time[node] < split_2_time_) &&
+                (flag_A[node] == 0) &&
+                (flag_B[node] == 0)
+            )
+            {
+                flag_B[node] = 1;
+                node = tree.parent[node];
+                if ((flag_A[node] == 1) && (tree.tree_sequence->tables->nodes.time[node] < time))
+                {
+                    time = tree.tree_sequence->tables->nodes.time[node];
+                }
+            }
+        }
+        return time;
     }
 
 
@@ -431,12 +485,10 @@ namespace treellh
             next_node = time_ordered_tree_nodes_[i];
             next_time = tree.tree_sequence->tables->nodes.time[next_node];
             next_pop = population_[next_node];
-            // std::cout << next_node << " pop: " << next_pop << std::endl;
         }
         // llh end
         for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
         {
-            // std::cout << "ln: " << lineages_num[pop_i] << std::endl;
             if (lineages_num[pop_i] > 1)
             {
                 if (current_node[pop_i] == -1)
@@ -459,6 +511,124 @@ namespace treellh
         return llh;
     }
 
+    /** 
+    * @brief Вычисляет правдоподобие дерева на заданном участке.
+    * 
+    * @param tree объект дерева в формате `tsk_tree_t`.
+    * @param time_start верхняя граница временного интервала.
+    * @param time_end нижняя граница временного интервала.
+    * @param populations вектор из популяций, для которых нужно вычислять правдоподобие.
+    * @param init_lineages_num количество ветвей в дереве в каждой популяции в момент времени `time_start`
+    * 
+    * @return вычисленное правдоподобие. 
+    */
+    double Scenario_Computer::smart_llh_to_nodes(const tsk_tree_t &tree, 
+        double time_start, double time_end, 
+        std::span<const int> populations, 
+        std::span<int> lineages_num, 
+        std::span<double> nodes_llh,
+        std::span<int> nodes_lineage_num,
+        std::span<int> nodes_population
+    )
+    {
+        double llh_step = 0;
+        
+        std::map<int, int> pop_to_i; 
+        for (size_t i = 0; i < populations.size(); ++i)
+        {
+            pop_to_i[populations[i]] = i;
+        }
+
+        tsk_id_t next_node = -1;
+        tsk_id_t cur_node = -1;
+        tsk_id_t cur_pop_i = -1;
+
+        double current_time = time_start;
+    
+        
+        size_t i = 0;
+        next_node = time_ordered_tree_nodes_[i];
+        double next_time = tree.tree_sequence->tables->nodes.time[next_node];
+        int next_pop = population_[next_node];
+
+        while (((next_time > time_start) || (pop_to_i.find(next_pop) == pop_to_i.end())) && next_time != 0)
+        {
+            i++;
+            next_node = time_ordered_tree_nodes_[i];
+            next_time = tree.tree_sequence->tables->nodes.time[next_node];
+            next_pop = population_[next_node];
+        }
+
+        while (next_time > time_end)
+        {
+            if (pop_to_i.find(next_pop) != pop_to_i.end())
+            {
+                llh_step = 0;
+                if (cur_node != -1)
+                {
+                    // llh with coal 
+                    llh_step = std::log(1 / N_[cur_pop_i] / 2.) + nodes_llh[cur_node];
+                }
+                for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                {
+                    llh_step += (
+                        -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2. 
+                        * (current_time - next_time)
+                    );
+                }
+
+                nodes_llh[next_node] += llh_step;
+                // std::cout << nodes_llh[next_node] << ", "<< next_time << std::endl;
+                nodes_population[next_node] = next_pop;
+                for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                {
+                    nodes_lineage_num[populations.size()*next_node + pop_i] = lineages_num[pop_i];
+                }
+
+                cur_node = next_node;
+                cur_pop_i = pop_to_i[next_pop];
+                current_time = next_time;
+                lineages_num[cur_pop_i] += 1;
+            }
+            i++;
+            next_node = time_ordered_tree_nodes_[i];
+            next_time = tree.tree_sequence->tables->nodes.time[next_node];
+            next_pop = population_[next_node];
+        }
+        // llh end
+        // std::cout << "ln: " << lineages_num[pop_i] << std::endl;
+
+        while ((i < time_ordered_tree_nodes_.size()) && (pop_to_i.find(next_pop) == pop_to_i.end()))
+        {
+            // std::cout << next_pop << std::endl;
+            i++;
+            next_node = time_ordered_tree_nodes_[i];
+            next_time = tree.tree_sequence->tables->nodes.time[next_node];
+            next_pop = population_[next_node]; 
+        }
+
+        llh_step = 0;
+        if (cur_node != -1) // it means we have coalescence in some population
+            llh_step = std::log(1 / N_[cur_pop_i] / 2.) + nodes_llh[cur_node];
+        for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+        {
+            llh_step += (
+                -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2. 
+                * (current_time - time_end) // current_time = start_time if no coalescence obtained.
+            );  
+        }
+        nodes_llh[next_node] += llh_step;
+        // std::cout << nodes_llh[next_node] << ", "<< next_time << ", " << population_[next_node] << std::endl; 
+        nodes_population[next_node] = next_pop;
+        for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+        {
+            // std::cout << pop_i << " " << lineages_num[pop_i] << ", ";
+            nodes_lineage_num[populations.size()*next_node + pop_i] = lineages_num[pop_i];
+        }
+        // std::cout << std::endl;
+        return nodes_llh[next_node];
+    }
+
     int Scenario_Computer::debug_sort_by_time(const tsk_tree_t &tree)
     {
         double t2, t1;
@@ -472,6 +642,244 @@ namespace treellh
         }
         return 0;
     }
+
+
+std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
+        const tsk_tree_t& tree, 
+        std::vector<double> migration_time,
+        std::vector<double> migration_prob
+    ) 
+    {
+    
+        std::vector<std::vector<double>> result(migration_time.size(), std::vector<double>(migration_prob.size(), 0));
+
+        tsk_size_t roots_num = tsk_tree_get_num_roots(&tree);
+
+        if (roots_num != 1)
+        {
+            std::cout << "Roots number is not equal to 1. Skipping the tree." << std::endl;
+            return result;
+        }
+
+        double migration_time_lb = migration_time.back();
+        migration_time_ = migration_time_lb;
+        double llh_root = 0;
+
+        std::fill(population_.begin(), population_.end(), -1);
+        
+        sort_by_time(tree);
+        compute_lower_nodes_split_1(tree);
+        compute_fixed_nodes(tree);
+
+        // print_lower_nodes_split_1();
+
+        int impossible_coal_node = check_imposible_split_2(tree);
+        if (impossible_coal_node != 0)
+        {
+            std::cout << "impossible scenario (coalescence between two isolated populations)." << std::endl;
+            std::cout << "Coalescence node (" << impossible_coal_node << ")." << std::endl;
+            return result;
+        }
+
+        int log_scenario_num = compute_log_scenarios_num();
+
+        std::vector<int> lineages_num;
+        std::vector<int> populations;
+
+        double root_time = tree.tree_sequence->tables->nodes.time[time_ordered_tree_nodes_[0]];
+        populations = {base_pop_index_}; 
+        int linages_num_root[] = {1};
+
+        if (root_time > split_1_time_)
+        {
+            llh_root += smart_llh(
+                tree, root_time, split_1_time_, populations, linages_num_root
+            );
+        }
+
+        tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
+        std::vector<double> no_structure_llh(number_of_nodes, 0);
+        std::vector<int> no_structure_lineage_num(number_of_nodes, 0);
+        std::vector<int> no_structure_pop(number_of_nodes, 0);
+
+        uint64_t scenario = 0;
+        set_scenario(tree, scenario);
+        populations = {base_pop_index_}; 
+        smart_llh_to_nodes(
+            tree, split_1_time_, split_2_time_, populations, sc_lineages_num_, 
+            no_structure_llh, no_structure_lineage_num, no_structure_pop
+        );
+        lineages_num = { 
+                sc_lineages_num_[0] - lower_split_2_out_linages_num_
+            };
+        smart_llh_to_nodes(
+            tree, split_2_time_, 0, populations, lineages_num, 
+            no_structure_llh, no_structure_lineage_num, no_structure_pop
+        );
+
+
+        double min_llh_i = 0;
+        for (size_t i = 0; i < time_ordered_tree_nodes_.size(); ++i)
+        {
+            if (no_structure_llh[time_ordered_tree_nodes_[i]] != 0)
+            {
+                if (no_structure_llh[time_ordered_tree_nodes_[i]] < no_structure_llh[time_ordered_tree_nodes_[min_llh_i]])
+                    min_llh_i = i;
+            }
+        }
+        
+
+        double A = no_structure_llh[time_ordered_tree_nodes_[min_llh_i]];
+
+        for (size_t i = min_llh_i + 1; i-- > 0;)
+        {
+            no_structure_llh[time_ordered_tree_nodes_[i]] = - (
+                no_structure_llh[time_ordered_tree_nodes_[i]] - A
+            );
+        }
+
+
+        if (log_scenario_num >= 20)
+        {
+            std::cout << "Attention! Memory need: " << (1 << (log_scenario_num - 10 - 10)) * sizeof(double) * 4 * number_of_nodes / 1024. << " gB." << std::endl;
+        }
+
+        tsk_id_t err;
+        std::vector<std::vector<double>> structure_llh(1 << log_scenario_num, std::vector<double>(number_of_nodes, 0));
+        std::vector<std::vector<int>> structure_lineage_num(1 << log_scenario_num, std::vector<int>(number_of_nodes * 2, 0));
+        std::vector<std::vector<int>> structure_pop(1 << log_scenario_num, std::vector<int>(number_of_nodes, 0));
+        
+
+        std::vector<uint64_t> abacaba = generate_abacaba(log_scenario_num);
+        scenario = 0;
+        for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
+        {
+            // std::cout << std::bitset<6>(scenario) << std::endl;
+            set_scenario(tree, scenario);
+            err = check_scenario(tree);
+            if (err != 0)
+            {
+                std::cout << "Error scenario: " << err << std::endl;
+                std::cout << is_fixed_[err] << std::endl;
+                std::cout << population_[err] << std::endl;
+                std::cout << ts_.tables->nodes.population[err] << std::endl;
+                std::cout << tree.tree_sequence->tables->nodes.time[err] << std::endl; 
+                std::cout << population_[tree.parent[err]] << std::endl;
+                std::cout << ts_.tables->nodes.time[tree.parent[err]] << std::endl;
+                break;
+            }
+
+            populations = {base_pop_index_, ghost_pop_index_}; 
+            smart_llh_to_nodes(
+                    tree, split_1_time_, split_2_time_, populations, sc_lineages_num_, 
+                    structure_llh[sc_i], structure_lineage_num[sc_i], structure_pop[sc_i]
+            );
+
+            populations = {base_pop_index_, ghost_pop_index_}; 
+            lineages_num = { 
+                sc_lineages_num_[0] - lower_split_2_out_linages_num_,
+                sc_lineages_num_[1]
+            };
+            // ||
+            smart_llh_to_nodes(
+                    tree, split_2_time_, migration_time_lb, populations, lineages_num, 
+                    structure_llh[sc_i], structure_lineage_num[sc_i], structure_pop[sc_i]
+            );
+
+            // std::cout << lineages_num[0] << " / " << lineages_num[1] << std::endl;
+            // std::cout << sc_i << " of " << pow(2, log_scenario_num) << " : " << log_prob << std::endl;
+            scenario = scenario ^ abacaba[sc_i];
+        }
+
+        populations = {base_pop_index_, ghost_pop_index_};
+        size_t node_i = 0;
+        tsk_id_t node = time_ordered_tree_nodes_[node_i];
+        double node_time = tree.tree_sequence->tables->nodes.time[node];
+        tsk_id_t prev_node;
+        double prev_time;
+        double llh_step_r = 0;
+        double llh_step = 0;
+        double llh_for_sc = 0;
+        double mig_prob = 0;
+        int lineages_num_total = 0;
+        int lineages_between[2];
+        double t = 0;
+        double p = 0;
+        for (size_t i = 0; i < migration_time.size(); ++i)
+        {
+            t = migration_time[i];
+            while ((node_time > t) || (population_[node] == outgroup_pop_index_))
+            {
+                node_i++;
+                if (population_[node] != outgroup_pop_index_)
+                {
+                    prev_node = node;
+                    prev_time = node_time;
+                }
+                node = time_ordered_tree_nodes_[node_i];
+                node_time = tree.tree_sequence->tables->nodes.time[node];
+            }
+            for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
+            {
+                lineages_num_total = 0;
+                lineages_between[0] = structure_lineage_num[sc_i][2*node + 0]; 
+                lineages_between[1] = structure_lineage_num[sc_i][2*node + 1]; 
+                if (split_2_time_ <= prev_time) // prev_time <= split_2 <= migration <= node_time
+                    lineages_between[0] += lower_split_2_out_linages_num_;
+                llh_step = std::log(1 / N_[structure_pop[sc_i][prev_node]] / 2.);
+                for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                {
+                    llh_step += (
+                        -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. / N_[pop_i] / 2. 
+                        * (prev_time - split_2_time_) // between prev_time and split.
+                    );
+                    llh_step += (
+                        -structure_lineage_num[sc_i][2*node + pop_i] * (structure_lineage_num[sc_i][2*node + pop_i] - 1) / 2. / N_[pop_i] / 2. 
+                        * (split_2_time_ - t) // between split and migration removing splited lineages.
+                    );
+                    lineages_num_total += structure_lineage_num[sc_i][2*node + pop_i];
+                }
+                
+                llh_for_sc = structure_llh[sc_i][prev_node] + llh_step;
+                // std::cout << llh_for_sc << std::endl;
+                // std::cout << structure_llh[sc_i][prev_node] << ", " << prev_time << std::endl;
+                // std::cout << llh_step << std::endl;
+                // std::cout << "hello epta" << std::endl;
+                // std::cout << structure_llh[sc_i][node] << std::endl;
+
+                for (size_t j = 0; j < migration_prob.size(); ++j)
+                {
+                    p = migration_prob[j];
+                    if ((p != 0) && (p != 1))
+                    {
+                        mig_prob = structure_lineage_num[sc_i][2*node + 0] * std::log(1.0 - p) \
+                                 + structure_lineage_num[sc_i][2*node + 1] * std::log(p);
+                    }
+                    // std::cout << sc_i << std::endl;
+                    // std::cout << structure_lineage_num[sc_i][2*node + 0] << " " \
+                    //           << structure_lineage_num[sc_i][2*node + 1] << std::endl;
+                    // std::cout <<  "scenario: " << " " << llh_for_sc << ' ' << structure_lineage_num[sc_i][2*node + 0] << std::endl;
+                    result[i][j] += std::exp(llh_for_sc + mig_prob);
+                    // std::cout << mig_prob << "Dont fohent about mig rpob!!!" << std::endl;
+                    // result[i][j] += std::exp(llh_for_sc);
+                }
+            }
+            llh_step_r = (
+                -lineages_num_total * (lineages_num_total - 1) / 2. / N_[base_pop_index_] / 2. 
+                * (t - node_time) // current_time = start_time if no coalescence obtained.
+            );
+            // std::cout << "tail: " << no_structure_llh[node] + llh_step_r << std::endl;
+            for (size_t j = 0; j < migration_prob.size(); ++j)
+            {
+                // std::cout << "root: " << llh_root << std::endl;
+                // std::cout << "leaves: " << no_structure_llh[node] + llh_step_r << std::endl;
+                // std::cout << "between" << llh_root + std::log(result[i][j]) << std::endl;
+                result[i][j] = llh_root + std::log(result[i][j]) + no_structure_llh[node] + llh_step_r;
+            }
+        }
+        return result;
+    }
+
 
     double Scenario_Computer::compute_llh(const tsk_tree_t& tree)
     {
@@ -507,6 +915,7 @@ namespace treellh
                 tree, root_time, split_1_time_, populations, linages_num_root
             );
         }
+        
         // std::cout << llh << std::endl;
 
         double llh_temp = 0;
@@ -520,7 +929,7 @@ namespace treellh
         uint64_t scenario = 0;
         for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
         {
-            std::cout << std::bitset<6>(scenario) << std::endl;
+            // std::cout << std::bitset<6>(scenario) << std::endl;
             log_prob = 0;
             set_scenario(tree, scenario);
             // impossible_coal_node = check_imposible_split_2(tree);
@@ -555,6 +964,7 @@ namespace treellh
             );
             log_prob += llh_temp;
 
+            // std::cout << llh_temp << std::endl;
             // second split probability
             // log_prob += lower_split_2_out_linages_num_ * std::log(1 - split_2_prop_) \
             //           + (sc_lineages_num_[0] - lower_split_2_out_linages_num_) * std::log(split_2_prop_);
@@ -570,7 +980,7 @@ namespace treellh
                     tree, split_2_time_, migration_time_, populations, lineages_num
             );
             log_prob += llh_temp;
-
+            // std::cout << llh_temp << std::endl;
             // migration probability
             // std::cout << migration_prob_ <<  std::endl;
             if (migration_prob_ != 1)
@@ -587,18 +997,21 @@ namespace treellh
             // std::cout << sc_i << " of " << pow(2, log_scenario_num) << " : " << log_prob << std::endl;
             scenario = scenario ^ abacaba[sc_i];
         }
+        // std::cout << "between " << std::log(prob_sum) << std::endl;
         llh += std::log(prob_sum);
-        populations = {outgroup_pop_index_};
-        lineages_num = {lower_split_2_out_linages_num_};
-        llh += smart_llh(tree, split_2_time_, migration_time_, populations, lineages_num);
+        // populations = {outgroup_pop_index_};
+        // lineages_num = {lower_split_2_out_linages_num_};
+        // llh += smart_llh(tree, split_2_time_, migration_time_, populations, lineages_num);
 
-        populations = {base_pop_index_, outgroup_pop_index_}; 
+        populations = {base_pop_index_}; 
         lineages_num = {
-            lineage_num_lower_migration,
-            lineages_num[0]
+            lineage_num_lower_migration
+            // lineages_num[0]
         };
         // std::cout << lineages_num[0] << " " << lineages_num[1] << std::endl;
-        llh += smart_llh(tree, migration_time_, 0, populations, lineages_num);
+        llh_temp = smart_llh(tree, migration_time_, 0, populations, lineages_num);
+        // std::cout << "tail " << llh_temp << std::endl;
+        llh += llh_temp;
         return llh;
     }
 
@@ -624,7 +1037,7 @@ namespace treellh
     {
         for (tsk_id_t node : lower_nodes_split_1_)
         {
-            std::cout << node << std::endl;
+            std::cout << node << ": " << is_fixed_[node] << std::endl;
         }
         std::cout << std::endl;
     }

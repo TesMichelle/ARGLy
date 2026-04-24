@@ -12,6 +12,29 @@ packagecache
 sandbox
 sim
 
+RELATE_arg
+RELATE_data
+
+TS_arg
+TS_data
+
+arg_files
+
+single_pop.vcz
+single_split.vcz
+sim_p_005_Tm_5000.vcz
+
+*.trees
+*.anc
+*.mut
+*.gz
+*.tbi
+*.npy
+*.haps
+*.map
+*.samples
+
+ARGLy.code-workspace
 
 # Prerequisites
 *.d

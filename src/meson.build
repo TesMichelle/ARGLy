@@ -1,6 +1,6 @@
 project('ARGLy', 'cpp',
   default_options: [
-    'cpp_std=c++20']
+    'cpp_std=c++23']
     )
 
 treellh_proj = subproject('treellh')
