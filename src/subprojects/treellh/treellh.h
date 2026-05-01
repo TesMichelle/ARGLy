@@ -28,11 +28,21 @@ namespace treellh
             CoalTable operator-(const CoalTable &B);
     };
 
+    struct Node
+    {
+        int population;
+        double time;
+        bool is_fixed;
+        bool is_skipped;
+    };
+
     class Scenario_Computer
     {
         private:
             const tsk_treeseq_t &ts_;
             std::vector<int> sample_population_;
+
+            std::vector<Node> nodes_;
 
             std::vector<bool> is_fixed_;
             std::vector<int> population_;
