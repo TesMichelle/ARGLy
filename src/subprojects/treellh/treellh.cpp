@@ -106,8 +106,8 @@ namespace treellh
     {
         sample_population_ = sample_population;
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts);
-        is_fixed_ = std::vector<bool>(number_of_nodes, 0);
-        population_ = std::vector<int>(number_of_nodes, -1);
+        is_fixed_ = std::vector<bool>(number_of_nodes + 1, 0);
+        population_ = std::vector<int>(number_of_nodes + 1, -1);
 
         set_parameters(parameters);
 
@@ -300,7 +300,7 @@ namespace treellh
     int Scenario_Computer::check_imposible_split_2(const tsk_tree_t &tree)
     {
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
-        std::vector<bool> flag(number_of_nodes, 0);
+        std::vector<bool> flag(number_of_nodes + 1, 0);
         // get samples from ts object
         const tsk_id_t *samples = tsk_treeseq_get_samples(tree.tree_sequence);
         const tsk_size_t samples_num = tsk_treeseq_get_num_samples(tree.tree_sequence);
@@ -334,8 +334,8 @@ namespace treellh
     double Scenario_Computer::find_lowest_coal(const tsk_tree_t& tree, std::span<const tsk_id_t> A, std::span<const tsk_id_t> B)
     {
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
-        std::vector<bool> flag_A(number_of_nodes, 0);
-        std::vector<bool> flag_B(number_of_nodes, 0);
+        std::vector<bool> flag_A(number_of_nodes + 1, 0);
+        std::vector<bool> flag_B(number_of_nodes + 1, 0);
         // get samples from ts object
 
         for (tsk_id_t node : A)

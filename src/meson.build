@@ -11,4 +11,8 @@ executable('main',
    dependencies : [treellh_dep],
    install : true)
 
+executable('argly',
+  'argly_cli.cpp',
+   dependencies : [treellh_dep],
+   install : true)
 
