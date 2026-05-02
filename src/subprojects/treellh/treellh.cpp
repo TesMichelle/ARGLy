@@ -523,8 +523,7 @@ namespace treellh
         std::span<const int> populations, 
         std::span<int> lineages_num, 
         std::span<double> nodes_llh,
-        std::span<int> nodes_lineage_num,
-        std::span<int> nodes_population
+        std::span<int> nodes_lineage_num
     )
     {
         double llh_step = 0;
@@ -575,7 +574,6 @@ namespace treellh
 
                 nodes_llh[next_node_id] += llh_step;
                 // std::cout << nodes_llh[next_node_id] << ", "<< next_time << std::endl;
-                nodes_population[next_node_id] = next_pop;
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
                     nodes_lineage_num[populations.size()*next_node_id + pop_i] = lineages_num[pop_i];
@@ -615,7 +613,6 @@ namespace treellh
         }
         nodes_llh[next_node_id] += llh_step;
         // std::cout << nodes_llh[next_node_id] << ", "<< next_time << ", " << nodes_[next_node_id].population << std::endl; 
-        nodes_population[next_node_id] = next_pop;
         for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
         {
             // std::cout << pop_i << " " << lineages_num[pop_i] << ", ";
@@ -699,21 +696,20 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
         std::vector<double> no_structure_llh(number_of_nodes, 0);
         std::vector<int> no_structure_lineage_num(number_of_nodes, 0);
-        std::vector<int> no_structure_pop(number_of_nodes, 0);
 
         uint64_t scenario = 0;
         set_scenario(tree, scenario);
         populations = {base_pop_index_}; 
         smart_llh_to_nodes(
             tree, split_1_time_, split_2_time_, populations, sc_lineages_num_, 
-            no_structure_llh, no_structure_lineage_num, no_structure_pop
+            no_structure_llh, no_structure_lineage_num
         );
         lineages_num = { 
                 sc_lineages_num_[0] - lower_split_2_out_linages_num_
             };
         smart_llh_to_nodes(
             tree, split_2_time_, 0, populations, lineages_num, 
-            no_structure_llh, no_structure_lineage_num, no_structure_pop
+            no_structure_llh, no_structure_lineage_num
         );
 
 
@@ -746,7 +742,6 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         tsk_id_t err_id;
         std::vector<double> structure_llh(number_of_nodes, 0);
         std::vector<int> structure_lineage_num(number_of_nodes * 2, 0);
-        std::vector<int> structure_pop(number_of_nodes, 0);
         
 
         std::vector<uint64_t> abacaba = generate_abacaba(log_scenario_num);
@@ -785,7 +780,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
             populations = {base_pop_index_, ghost_pop_index_}; 
             smart_llh_to_nodes(
                     tree, split_1_time_, split_2_time_, populations, sc_lineages_num_, 
-                    structure_llh, structure_lineage_num, structure_pop
+                    structure_llh, structure_lineage_num
             );
 
             populations = {base_pop_index_, ghost_pop_index_}; 
@@ -796,7 +791,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
             // ||
             smart_llh_to_nodes(
                     tree, split_2_time_, migration_time_lb, populations, lineages_num, 
-                    structure_llh, structure_lineage_num, structure_pop
+                    structure_llh, structure_lineage_num
             );
 
             // std::cout << lineages_num[0] << " / " << lineages_num[1] << std::endl;
@@ -823,7 +818,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
                 lineages_between[1] = structure_lineage_num[2*node_id + 1]; 
                 if (split_2_time_ <= prev_time) // prev_time <= split_2 <= migration <= node_time
                     lineages_between[0] += lower_split_2_out_linages_num_;
-                llh_step = std::log(1 / N_[structure_pop[prev_node]] / 2.);
+                llh_step = std::log(1 / N_[nodes_[prev_node].population] / 2.);
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
                     llh_step += (
