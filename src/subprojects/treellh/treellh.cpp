@@ -543,18 +543,16 @@ namespace treellh
         
         size_t i = 0;
         next_node_id = time_ordered_tree_nodes_ids_[i];
-        int next_pop = nodes_[next_node_id].population;
 
-        while (((nodes_[next_node_id].time > time_start) || (pop_to_i.find(next_pop) == pop_to_i.end())) && nodes_[next_node_id].time != 0)
+        while (((nodes_[next_node_id].time > time_start) || (pop_to_i.find(nodes_[next_node_id].population) == pop_to_i.end())) && nodes_[next_node_id].time != 0)
         {
             i++;
             next_node_id = time_ordered_tree_nodes_ids_[i];
-            next_pop = nodes_[next_node_id].population;
         }
 
         while (nodes_[next_node_id].time > time_end)
         {
-            if (pop_to_i.find(next_pop) != pop_to_i.end())
+            if (pop_to_i.find(nodes_[next_node_id].population) != pop_to_i.end())
             {
                 llh_step = 0;
                 if (cur_node_id != -1)
@@ -578,23 +576,21 @@ namespace treellh
                 }
 
                 cur_node_id = next_node_id;
-                cur_pop_i = pop_to_i[next_pop];
+                cur_pop_i = pop_to_i[nodes_[next_node_id].population];
                 current_time = nodes_[next_node_id].time;
                 lineages_num[cur_pop_i] += 1;
             }
             i++;
             next_node_id = time_ordered_tree_nodes_ids_[i];
-            next_pop = nodes_[next_node_id].population;
         }
         // llh end
         // std::cout << "ln: " << lineages_num[pop_i] << std::endl;
 
-        while ((i < time_ordered_tree_nodes_ids_.size()) && (pop_to_i.find(next_pop) == pop_to_i.end()))
+        while ((i < time_ordered_tree_nodes_ids_.size()) && (pop_to_i.find(nodes_[next_node_id].population) == pop_to_i.end()))
         {
             // std::cout << next_pop << std::endl;
             i++;
             next_node_id = time_ordered_tree_nodes_ids_[i];
-            next_pop = nodes_[next_node_id].population; 
         }
 
         llh_step = 0;
