@@ -1,6 +1,5 @@
 #include <vector>
 #include <span>
-#include <mdspan>
 #include <map>
 #include <cmath>
 #include <algorithm>
