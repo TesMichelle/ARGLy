@@ -95,7 +95,7 @@ namespace treellh
 
             double smart_llh(double, double, 
                 std::span<const int>, std::span<int>);
-            double smart_llh_to_nodes(const tsk_tree_t &, double, double, 
+            double smart_llh_to_nodes(double, double, 
                 std::span<const int>, std::span<int>, std::span<double>, std::span<int>);
 
             std::vector<std::vector<double>> compute_grid_fast(const tsk_tree_t &, std::vector<double>, std::vector<double>);
