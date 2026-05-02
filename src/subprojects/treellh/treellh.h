@@ -76,6 +76,7 @@ namespace treellh
 
             int compute_lower_nodes_split_1(const tsk_tree_t&);
             int compute_fixed_nodes(const tsk_tree_t&);
+            int compute_skipped_nodes(const tsk_tree_t&);
             int compute_log_scenarios_num();
 
             int compute_scenarious();

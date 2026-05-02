@@ -165,8 +165,8 @@ namespace treellh
                 node_id = samples[i];   
                 while ( 
                     (node_id != TSK_NULL) &&
-                    (tree.tree_sequence->tables->nodes.time[node_id] < split_1_time_) &&
                     (nodes_[node_id].is_fixed == 0)
+                    // (tree.tree_sequence->tables->nodes.time[node_id] < split_1_time_) &&
                 )
                 {
                     // mark population for all outgroup nodes
@@ -176,11 +176,51 @@ namespace treellh
                     node_id = tree.parent[node_id];
                 }
                 // compute the number of linages at the moment of split 2 in outgrou
-                if (tree.tree_sequence->tables->nodes.time[node_id] >= split_2_time_)
+                if (
+                    (tree.tree_sequence->tables->nodes.time[node_id] >= split_2_time_) || 
+                    (node_id == TSK_NULL)
+                ) 
                     lower_split_2_out_linages_num_ += 1;
             }
         }
         return 0;
+    }
+
+    int Scenario_Computer::compute_skipped_nodes(const tsk_tree_t& tree)
+    {
+        int c = 0;
+        for (auto &node : nodes_)
+        {
+            node.is_skipped = 0;
+        }
+
+        const tsk_id_t *samples = tsk_treeseq_get_samples(tree.tree_sequence);
+        const tsk_size_t samples_num = tsk_treeseq_get_num_samples(tree.tree_sequence);
+        // loop over all samples
+        tsk_id_t node_id;
+        for (tsk_size_t i = 0; i < samples_num; i++)
+        {
+            // for each sample from outgroup we mark parents until first (ancient) split. 
+            if (sample_population_[samples[i]] == outgroup_data_index_)// Outgroup 
+            {
+                node_id = samples[i];   
+                while ( 
+                    (node_id != TSK_NULL) &&
+                    (nodes_[node_id].is_skipped == false) &&
+                    (
+                        (node_id == samples[i]) || 
+                        (nodes_[tree.left_child[node_id]].is_fixed == nodes_[tree.right_child[node_id]].is_fixed)
+                    )
+                )
+                {
+                    // mark population for all outgroup nodes
+                    nodes_[node_id].is_skipped = true;
+                    node_id = tree.parent[node_id];
+                }
+            }
+        }
+
+        return c;
     }
 
     /** 
