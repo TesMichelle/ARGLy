@@ -30,10 +30,10 @@ namespace treellh
 
     struct Node
     {
-        int population;
-        double time;
-        bool is_fixed;
-        bool is_skipped;
+        int population = -1;
+        double time = -1;
+        bool is_fixed = false;
+        bool is_skipped = false;
     };
 
     class Scenario_Computer
@@ -47,7 +47,7 @@ namespace treellh
             std::vector<bool> is_fixed_;
             std::vector<int> population_;
             std::vector<tsk_id_t> lower_nodes_split_1_;
-            std::vector<tsk_id_t> time_ordered_tree_nodes_;
+            std::vector<tsk_id_t> time_ordered_tree_nodes_ids_;
 
             int lower_split_2_out_linages_num_;
 
@@ -93,7 +93,7 @@ namespace treellh
             int sort_by_time(const tsk_tree_t&);
             int debug_sort_by_time(const tsk_tree_t&);
 
-            double smart_llh(const tsk_tree_t &, double, double, 
+            double smart_llh(double, double, 
                 std::span<const int>, std::span<int>);
             double smart_llh_to_nodes(const tsk_tree_t &, double, double, 
                 std::span<const int>, std::span<int>, std::span<double>, std::span<int>, std::span<int>);
