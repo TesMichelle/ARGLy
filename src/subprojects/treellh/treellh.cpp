@@ -59,7 +59,17 @@ namespace treellh
         {
             t1 = B.time_[i];
             t2 = (*this).time_[j];
-            result.time_[i+j] = (t1 < t2) ? (*this).time_[i++] : B.time_[j++];
+            int k = i + j;
+            if (t1 < t2)
+            {
+                result.time_[k] = (*this).time_[i];
+                i++;
+            }
+            else
+            {
+                result.time_[k] = B.time_[j];
+                j++;
+            }
         }
         return result;
     }
@@ -875,7 +885,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
                                     + structure_lineage_num[2*node_id + 1] * std::log(p);
                     }
                     // std::cout << sc_i << std::endl;
-                    // std::cout << structure_lineage_num[sc_i][2*node_id + 0] << " " \
+                    // std::cout << structure_lineage_num[sc_i][2*node_id + 0] << " "
                     //           << structure_lineage_num[sc_i][2*node_id + 1] << std::endl;
                     // std::cout <<  "scenario: " << " " << llh_for_sc << ' ' << structure_lineage_num[sc_i][2*node_id + 0] << std::endl;
                     result[i][j] += std::exp(llh_for_sc + mig_prob);
@@ -979,7 +989,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
             }
 
             // fisrt split probabiltiy
-            // log_prob += sc_lineages_num_[0] * std::log(split_1_prop_) \
+            // log_prob += sc_lineages_num_[0] * std::log(split_1_prop_)
             //           + sc_lineages_num_[1] * std::log(1 - split_1_prop_);
 
             // /|
@@ -992,7 +1002,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
 
             // std::cout << llh_temp << std::endl;
             // second split probability
-            // log_prob += lower_split_2_out_linages_num_ * std::log(1 - split_2_prop_) \
+            // log_prob += lower_split_2_out_linages_num_ * std::log(1 - split_2_prop_)
             //           + (sc_lineages_num_[0] - lower_split_2_out_linages_num_) * std::log(split_2_prop_);
             // std::cout << sc_lineages_num_[0] - lower_split_2_out_linages_num_ << " / " << sc_lineages_num_[1] << std::endl;
             // std::cout << "lower_split_2_out_linages_num_: " << lower_split_2_out_linages_num_ << std::endl;
