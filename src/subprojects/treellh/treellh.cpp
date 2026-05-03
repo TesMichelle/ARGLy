@@ -187,8 +187,9 @@ namespace treellh
                 }
                 // compute the number of linages at the moment of split 2 in outgrou
                 if (
-                    (tree.tree_sequence->tables->nodes.time[node_id] >= split_2_time_) || 
-                    (node_id == TSK_NULL)
+                    (node_id == TSK_NULL) ||
+                    (tree.tree_sequence->tables->nodes.time[node_id] >= split_2_time_)
+                    
                 ) 
                     lower_split_2_out_linages_num_ += 1;
             }
