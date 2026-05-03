@@ -793,7 +793,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         int lineages_between[2];
         size_t node_i;
         tsk_id_t node_id;
-        tsk_id_t prev_node_id;
+        tsk_id_t prev_node_id = -1;
         double llh_step_r = 0;
         double llh_step = 0;
         double llh_for_sc = 0;
@@ -839,6 +839,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
             // std::cout << sc_i << " of " << pow(2, log_scenario_num) << " : " << log_prob << std::endl;
             node_i = 0;
             node_id = time_ordered_tree_nodes_ids_[node_i];
+            prev_node_id = - 1;
             for (size_t i = 0; i < migration_time.size(); ++i)
             {
                 t = migration_time[i];
@@ -851,6 +852,19 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
                     }
                     node_id = time_ordered_tree_nodes_ids_[node_i];
                 }
+
+                if (prev_node_id == -1)
+                {
+                    if (sc_i == abacaba.size() - 1)
+                    {
+                        for (size_t j = 0; j < migration_prob.size(); ++j)
+                        {
+                            result[i][j] = llh_root + no_structure_llh[node_id];
+                        }
+                    }
+                    continue;
+                }
+
                 lineages_num_total = 0;
                 lineages_between[0] = structure_lineage_num[2*node_id + 0]; 
                 lineages_between[1] = structure_lineage_num[2*node_id + 1]; 
