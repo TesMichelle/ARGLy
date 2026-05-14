@@ -1,8 +1,35 @@
 #include "treellh.h"
 
+#include <limits>
+#include <stdexcept>
 
 namespace treellh
 {
+    namespace
+    {
+        double grid_N_value(
+            const std::vector<std::vector<double>>& N_grid,
+            int population,
+            size_t n_i
+        )
+        {
+            const auto &values = N_grid.at(static_cast<size_t>(population));
+            return values.size() == 1 ? values[0] : values[n_i];
+        }
+
+        double migration_log_prob(int base_lineages, int ghost_lineages, double p)
+        {
+            if (p == 0)
+            {
+                return ghost_lineages == 0 ? 0 : -std::numeric_limits<double>::infinity();
+            }
+            if (p == 1)
+            {
+                return base_lineages == 0 ? 0 : -std::numeric_limits<double>::infinity();
+            }
+            return base_lineages * std::log(1.0 - p) + ghost_lineages * std::log(p);
+        }
+    }
 
     // CoalTable implemantation
 
@@ -574,10 +601,12 @@ namespace treellh
         std::span<const int> populations, 
         std::span<int> lineages_num, 
         std::span<double> nodes_llh,
-        std::span<int> nodes_lineage_num
+        std::span<int> nodes_lineage_num,
+        const std::vector<std::vector<double>>& N_grid,
+        size_t N_grid_size
     )
     {
-        double llh_step = 0;
+        std::vector<double> llh_step(N_grid_size, 0);
         
         std::map<int, int> pop_to_i; 
         for (size_t i = 0; i < populations.size(); ++i)
@@ -605,22 +634,27 @@ namespace treellh
         {
             if (pop_to_i.find(nodes_[next_node_id].population) != pop_to_i.end())
             {
-                llh_step = 0;
-                if (cur_node_id != -1)
+                std::fill(llh_step.begin(), llh_step.end(), 0);
+                for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
                 {
-                    // llh with coal 
-                    llh_step = std::log(1 / N_[cur_pop_i] / 2.) + nodes_llh[cur_node_id];
-                }
-                for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
-                {
-                    llh_step += (
-                        -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2. 
-                        * (current_time - nodes_[next_node_id].time)
-                    );
+                    if (cur_node_id != -1)
+                    {
+                        const double N_cur = grid_N_value(N_grid, populations[cur_pop_i], n_i);
+                        llh_step[n_i] = std::log(1 / N_cur / 2.)
+                            + nodes_llh[static_cast<size_t>(cur_node_id) * N_grid_size + n_i];
+                    }
+                    for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                    {
+                        const double N_pop = grid_N_value(N_grid, populations[pop_i], n_i);
+                        llh_step[n_i] += (
+                            -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_pop / 2. 
+                            * (current_time - nodes_[next_node_id].time)
+                        );
+                    }
+
+                    nodes_llh[static_cast<size_t>(next_node_id) * N_grid_size + n_i] += llh_step[n_i];
                 }
 
-                nodes_llh[next_node_id] += llh_step;
-                // std::cout << nodes_llh[next_node_id] << ", "<< nodes_[next_node_id].time << std::endl;
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
                     nodes_lineage_num[populations.size()*next_node_id + pop_i] = lineages_num[pop_i];
@@ -644,25 +678,33 @@ namespace treellh
             next_node_id = time_ordered_tree_nodes_ids_[i];
         }
 
-        llh_step = 0;
-        if (cur_node_id != -1) // it means we have coalescence in some population
-            llh_step = std::log(1 / N_[cur_pop_i] / 2.) + nodes_llh[cur_node_id];
-        for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+        std::fill(llh_step.begin(), llh_step.end(), 0);
+        for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
         {
-            llh_step += (
-                -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2. 
-                * (current_time - time_end) // current_time = start_time if no coalescence obtained.
-            );  
+            if (cur_node_id != -1) // it means we have coalescence in some population
+            {
+                const double N_cur = grid_N_value(N_grid, populations[cur_pop_i], n_i);
+                llh_step[n_i] = std::log(1 / N_cur / 2.)
+                    + nodes_llh[static_cast<size_t>(cur_node_id) * N_grid_size + n_i];
+            }
+            for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+            {
+                const double N_pop = grid_N_value(N_grid, populations[pop_i], n_i);
+                llh_step[n_i] += (
+                    -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_pop / 2. 
+                    * (current_time - time_end) // current_time = start_time if no coalescence obtained.
+                );  
+            }
+            nodes_llh[static_cast<size_t>(next_node_id) * N_grid_size + n_i] += llh_step[n_i];
         }
-        nodes_llh[next_node_id] += llh_step;
-        // std::cout << nodes_llh[next_node_id] << ", "<< nodes_[next_node_id].time << ", " << nodes_[next_node_id].population << std::endl; 
+
         for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
         {
             // std::cout << pop_i << " " << lineages_num[pop_i] << ", ";
             nodes_lineage_num[populations.size()*next_node_id + pop_i] = lineages_num[pop_i];
         }
         // std::cout << std::endl;
-        return nodes_llh[next_node_id];
+        return nodes_llh[static_cast<size_t>(next_node_id) * N_grid_size];
     }
 
     int Scenario_Computer::debug_sort_by_time(const tsk_tree_t &tree)
@@ -683,11 +725,44 @@ namespace treellh
 std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         const tsk_tree_t& tree, 
         std::vector<double> migration_time,
-        std::vector<double> migration_prob
+        std::vector<double> migration_prob,
+        std::vector<std::vector<double>> N
     ) 
     {
+        if (N.empty())
+        {
+            N = {{N_[0]}, {N_[1]}, {N_[2]}};
+        }
+        if (N.size() > N_.size())
+        {
+            throw std::invalid_argument("N grid must contain at most one vector per population");
+        }
+        while (N.size() < N_.size())
+        {
+            N.push_back({N_[N.size()]});
+        }
+
+        size_t N_grid_size = 1;
+        for (const auto &values : N)
+        {
+            N_grid_size = std::max(N_grid_size, values.size());
+        }
+        for (size_t pop_i = 0; pop_i < N.size(); ++pop_i)
+        {
+            if (N[pop_i].empty())
+            {
+                N[pop_i] = {N_[pop_i]};
+            }
+            if (N[pop_i].size() != 1 && N[pop_i].size() != N_grid_size)
+            {
+                throw std::invalid_argument("each N grid vector must have size 1 or the common N grid size");
+            }
+        }
     
-        std::vector<std::vector<double>> result(migration_time.size(), std::vector<double>(migration_prob.size(), 0));
+        std::vector<std::vector<double>> result(
+            migration_time.size() * N_grid_size,
+            std::vector<double>(migration_prob.size(), 0)
+        );
 
         tsk_size_t roots_num = tsk_tree_get_num_roots(&tree);
 
@@ -699,7 +774,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
 
         double migration_time_lb = migration_time.back();
         migration_time_ = migration_time_lb;
-        double llh_root = 0;
+        std::vector<double> llh_root(N_grid_size, 0);
 
         for (auto &node : nodes_)
         {
@@ -731,13 +806,23 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
 
         if (root_time > split_1_time_)
         {
-            llh_root += smart_llh(
-                root_time, split_1_time_, populations, linages_num_root
-            );
+            std::vector<double> saved_N = N_;
+            for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
+            {
+                for (size_t pop_i = 0; pop_i < N_.size(); ++pop_i)
+                {
+                    N_[pop_i] = grid_N_value(N, static_cast<int>(pop_i), n_i);
+                }
+                int root_lineages[] = {linages_num_root[0]};
+                llh_root[n_i] += smart_llh(
+                    root_time, split_1_time_, populations, root_lineages
+                );
+            }
+            N_ = saved_N;
         }
 
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
-        std::vector<double> no_structure_llh(number_of_nodes, 0);
+        std::vector<double> no_structure_llh(number_of_nodes * N_grid_size, 0);
         std::vector<int> no_structure_lineage_num(number_of_nodes, 0);
 
         uint64_t scenario = 0;
@@ -745,35 +830,39 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         populations = {base_pop_index_}; 
         smart_llh_to_nodes(
             split_1_time_, split_2_time_, populations, sc_lineages_num_, 
-            no_structure_llh, no_structure_lineage_num
+            no_structure_llh, no_structure_lineage_num, N, N_grid_size
         );
         lineages_num = { 
                 sc_lineages_num_[0] - lower_split_2_out_linages_num_
             };
         smart_llh_to_nodes(
             split_2_time_, 0, populations, lineages_num, 
-            no_structure_llh, no_structure_lineage_num
+            no_structure_llh, no_structure_lineage_num, N, N_grid_size
         );
 
-
-        double min_llh_i = 0;
-        for (size_t i = 0; i < time_ordered_tree_nodes_ids_.size(); ++i)
+        for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
         {
-            if (no_structure_llh[time_ordered_tree_nodes_ids_[i]] != 0)
+            size_t min_llh_i = 0;
+            for (size_t i = 0; i < time_ordered_tree_nodes_ids_.size(); ++i)
             {
-                if (no_structure_llh[time_ordered_tree_nodes_ids_[i]] < no_structure_llh[time_ordered_tree_nodes_ids_[min_llh_i]])
-                    min_llh_i = i;
+                const size_t node_offset = static_cast<size_t>(time_ordered_tree_nodes_ids_[i]) * N_grid_size + n_i;
+                const size_t min_offset = static_cast<size_t>(time_ordered_tree_nodes_ids_[min_llh_i]) * N_grid_size + n_i;
+                if (no_structure_llh[node_offset] != 0)
+                {
+                    if (no_structure_llh[node_offset] < no_structure_llh[min_offset])
+                        min_llh_i = i;
+                }
             }
-        }
-        
 
-        double A = no_structure_llh[time_ordered_tree_nodes_ids_[min_llh_i]];
+            double A = no_structure_llh[static_cast<size_t>(time_ordered_tree_nodes_ids_[min_llh_i]) * N_grid_size + n_i];
 
-        for (size_t i = min_llh_i + 1; i-- > 0;)
-        {
-            no_structure_llh[time_ordered_tree_nodes_ids_[i]] = - (
-                no_structure_llh[time_ordered_tree_nodes_ids_[i]] - A
-            );
+            for (size_t i = min_llh_i + 1; i-- > 0;)
+            {
+                const size_t node_offset = static_cast<size_t>(time_ordered_tree_nodes_ids_[i]) * N_grid_size + n_i;
+                no_structure_llh[node_offset] = - (
+                    no_structure_llh[node_offset] - A
+                );
+            }
         }
 
 
@@ -783,7 +872,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         }
 
         tsk_id_t err_id;
-        std::vector<double> structure_llh(number_of_nodes, 0);
+        std::vector<double> structure_llh(number_of_nodes * N_grid_size, 0);
         std::vector<int> structure_lineage_num(number_of_nodes * 2, 0);
         
 
@@ -803,6 +892,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
         for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
         {
             std::fill(structure_llh.begin(), structure_llh.end(), 0);
+            std::fill(structure_lineage_num.begin(), structure_lineage_num.end(), 0);
             // std::cout << std::bitset<6>(scenario) << std::endl;
             set_scenario(tree, scenario);
             err_id = check_scenario(tree);
@@ -821,7 +911,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
             populations = {base_pop_index_, ghost_pop_index_}; 
             smart_llh_to_nodes(
                     split_1_time_, split_2_time_, populations, sc_lineages_num_, 
-                    structure_llh, structure_lineage_num
+                    structure_llh, structure_lineage_num, N, N_grid_size
             );
 
             populations = {base_pop_index_, ghost_pop_index_}; 
@@ -832,7 +922,7 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
             // ||
             smart_llh_to_nodes(
                     split_2_time_, migration_time_lb, populations, lineages_num, 
-                    structure_llh, structure_lineage_num
+                    structure_llh, structure_lineage_num, N, N_grid_size
             );
 
             // std::cout << lineages_num[0] << " / " << lineages_num[1] << std::endl;
@@ -857,9 +947,14 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
                 {
                     if (sc_i == abacaba.size() - 1)
                     {
-                        for (size_t j = 0; j < migration_prob.size(); ++j)
+                        for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
                         {
-                            result[i][j] = llh_root + no_structure_llh[node_id];
+                            const size_t row = i * N_grid_size + n_i;
+                            for (size_t j = 0; j < migration_prob.size(); ++j)
+                            {
+                                result[row][j] = llh_root[n_i]
+                                    + no_structure_llh[static_cast<size_t>(node_id) * N_grid_size + n_i];
+                            }
                         }
                     }
                     continue;
@@ -870,56 +965,51 @@ std::vector<std::vector<double>> Scenario_Computer::compute_grid_fast(
                 lineages_between[1] = structure_lineage_num[2*node_id + 1]; 
                 if (split_2_time_ <= nodes_[prev_node_id].time) // prev_time <= split_2 <= migration <= node_time
                     lineages_between[0] += lower_split_2_out_linages_num_;
-                llh_step = std::log(1 / N_[nodes_[prev_node_id].population] / 2.);
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
-                    llh_step += (
-                        -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. / N_[pop_i] / 2. 
-                        * (nodes_[prev_node_id].time - split_2_time_) // between prev_time and split.
-                    );
-                    llh_step += (
-                        -structure_lineage_num[2*node_id + pop_i] * (structure_lineage_num[2*node_id + pop_i] - 1) / 2. / N_[pop_i] / 2. 
-                        * (split_2_time_ - t) // between split and migration removing splited lineages.
-                    );
                     lineages_num_total += structure_lineage_num[2*node_id + pop_i];
                 }
-                
-                llh_for_sc = structure_llh[prev_node_id] + llh_step;
-                // std::cout << llh_for_sc << std::endl;
-                // std::cout << structure_llh[sc_i][prev_node] << ", " << prev_time << std::endl;
-                // std::cout << llh_step << std::endl;
-                // std::cout << "hello epta" << std::endl;
-                // std::cout << structure_llh[sc_i][node_id] << std::endl;
 
-                for (size_t j = 0; j < migration_prob.size(); ++j)
+                for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
                 {
-                    p = migration_prob[j];
-                    if ((p != 0) && (p != 1))
+                    const size_t row = i * N_grid_size + n_i;
+                    llh_step = std::log(1 / grid_N_value(N, nodes_[prev_node_id].population, n_i) / 2.);
+                    for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                     {
-                        mig_prob = structure_lineage_num[2*node_id + 0] * std::log(1.0 - p) \
-                                    + structure_lineage_num[2*node_id + 1] * std::log(p);
+                        const double N_pop = grid_N_value(N, populations[pop_i], n_i);
+                        llh_step += (
+                            -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. / N_pop / 2. 
+                            * (nodes_[prev_node_id].time - split_2_time_) // between prev_time and split.
+                        );
+                        llh_step += (
+                            -structure_lineage_num[2*node_id + pop_i] * (structure_lineage_num[2*node_id + pop_i] - 1) / 2. / N_pop / 2. 
+                            * (split_2_time_ - t) // between split and migration removing splited lineages.
+                        );
                     }
-                    // std::cout << sc_i << std::endl;
-                    // std::cout << structure_lineage_num[sc_i][2*node_id + 0] << " "
-                    //           << structure_lineage_num[sc_i][2*node_id + 1] << std::endl;
-                    // std::cout <<  "scenario: " << " " << llh_for_sc << ' ' << structure_lineage_num[sc_i][2*node_id + 0] << std::endl;
-                    result[i][j] += std::exp(llh_for_sc + mig_prob);
-                    // std::cout << mig_prob << "Dont fohent about mig rpob!!!" << std::endl;
-                    // result[i][j] += std::exp(llh_for_sc);
-                }
-                if (sc_i == abacaba.size() - 1)
-                {
-                    llh_step_r = (
-                        -lineages_num_total * (lineages_num_total - 1) / 2. / N_[base_pop_index_] / 2. 
-                        * (t - nodes_[node_id].time) // current_time = start_time if no coalescence obtained.
-                    );
-                    // std::cout << "tail: " << no_structure_llh[node_id] + llh_step_r << std::endl;
+
+                    llh_for_sc = structure_llh[static_cast<size_t>(prev_node_id) * N_grid_size + n_i] + llh_step;
                     for (size_t j = 0; j < migration_prob.size(); ++j)
                     {
-                        // std::cout << "root: " << llh_root << std::endl;
-                        // std::cout << "leaves: " << no_structure_llh[node_id] + llh_step_r << std::endl;
-                        // std::cout << "between" << llh_root + std::log(result[i][j]) << std::endl;
-                        result[i][j] = llh_root + std::log(result[i][j]) + no_structure_llh[node_id] + llh_step_r;
+                        p = migration_prob[j];
+                        mig_prob = migration_log_prob(
+                            structure_lineage_num[2*node_id + 0],
+                            structure_lineage_num[2*node_id + 1],
+                            p
+                        );
+                        result[row][j] += std::exp(llh_for_sc + mig_prob);
+                    }
+                    if (sc_i == abacaba.size() - 1)
+                    {
+                        llh_step_r = (
+                            -lineages_num_total * (lineages_num_total - 1) / 2. / grid_N_value(N, base_pop_index_, n_i) / 2. 
+                            * (t - nodes_[node_id].time) // current_time = start_time if no coalescence obtained.
+                        );
+                        for (size_t j = 0; j < migration_prob.size(); ++j)
+                        {
+                            result[row][j] = llh_root[n_i] + std::log(result[row][j])
+                                + no_structure_llh[static_cast<size_t>(node_id) * N_grid_size + n_i]
+                                + llh_step_r;
+                        }
                     }
                 }
             }

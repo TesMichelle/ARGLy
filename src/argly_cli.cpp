@@ -32,6 +32,7 @@ struct Config {
     std::vector<int> sample_population;
     std::vector<double> grid_time = {500};
     std::vector<double> grid_prob = {0.2};
+    std::vector<std::vector<double>> grid_N;
     int admixed_index = 0;
     int outgroup_index = 1;
     size_t sim_count = 0;
@@ -50,6 +51,7 @@ void print_usage(const char *program)
         << "  --params mt,split2,split1,mp,split2p,split1p,Nbase,Nghost,Noutgroup\n"
         << "  --sample-population comma-separated population id per sample node id\n"
         << "  --grid-time and --grid-prob accept either a,b,n or comma-separated values\n"
+        << "  --grid-N-base, --grid-N-ghost and --grid-N-outgroup add an N grid axis\n"
         << "  --tree-num K samples approximately K trees along the sequence\n"
         << "  --text-output writes grid as whitespace text instead of raw doubles\n";
 }
@@ -149,6 +151,21 @@ Config parse_args(int argc, char **argv)
             cfg.grid_time = parse_grid_spec(require_value(i, argc, argv));
         } else if (arg == "--grid-prob") {
             cfg.grid_prob = parse_grid_spec(require_value(i, argc, argv));
+        } else if (arg == "--grid-N-base") {
+            if (cfg.grid_N.empty()) {
+                cfg.grid_N = {{}, {}, {}};
+            }
+            cfg.grid_N[0] = parse_grid_spec(require_value(i, argc, argv));
+        } else if (arg == "--grid-N-ghost") {
+            if (cfg.grid_N.empty()) {
+                cfg.grid_N = {{}, {}, {}};
+            }
+            cfg.grid_N[1] = parse_grid_spec(require_value(i, argc, argv));
+        } else if (arg == "--grid-N-outgroup") {
+            if (cfg.grid_N.empty()) {
+                cfg.grid_N = {{}, {}, {}};
+            }
+            cfg.grid_N[2] = parse_grid_spec(require_value(i, argc, argv));
         } else if (arg == "--admixed-index") {
             cfg.admixed_index = std::stoi(require_value(i, argc, argv));
         } else if (arg == "--outgroup-index") {
@@ -184,6 +201,19 @@ Config parse_args(int argc, char **argv)
     }
     if (cfg.mode == "grid" && (cfg.grid_time.empty() || cfg.grid_prob.empty())) {
         throw std::runtime_error("--grid-time and --grid-prob must be non-empty");
+    }
+    if (cfg.grid_N.empty()) {
+        cfg.grid_N = {{cfg.parameters[6]}, {cfg.parameters[7]}, {cfg.parameters[8]}};
+    } else {
+        if (cfg.grid_N[0].empty()) {
+            cfg.grid_N[0] = {cfg.parameters[6]};
+        }
+        if (cfg.grid_N[1].empty()) {
+            cfg.grid_N[1] = {cfg.parameters[7]};
+        }
+        if (cfg.grid_N[2].empty()) {
+            cfg.grid_N[2] = {cfg.parameters[8]};
+        }
     }
     return cfg;
 }
@@ -302,7 +332,14 @@ std::vector<std::vector<double>> compute_grid_file(const Config &cfg, const std:
     int ret = tsk_tree_init(&tree, &ts, 0);
     check_tsk_error(ret);
 
-    std::vector<std::vector<double>> result(cfg.grid_time.size(), std::vector<double>(cfg.grid_prob.size(), 0));
+    size_t N_grid_size = 1;
+    for (const auto &values : cfg.grid_N) {
+        N_grid_size = std::max(N_grid_size, values.size());
+    }
+    std::vector<std::vector<double>> result(
+        cfg.grid_time.size() * N_grid_size,
+        std::vector<double>(cfg.grid_prob.size(), 0)
+    );
     double seq_len = tsk_treeseq_get_sequence_length(&ts);
     double step = seq_len / static_cast<double>(cfg.tree_num);
     double left_x = -step - 1;
@@ -312,8 +349,8 @@ std::vector<std::vector<double>> compute_grid_file(const Config &cfg, const std:
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) {
         if (tree.interval.left - left_x > step) {
             print_progress(tree_c++, cfg.tree_num);
-            auto temp = computer.compute_grid_fast(tree, cfg.grid_time, cfg.grid_prob);
-            for (size_t i = 0; i < cfg.grid_time.size(); ++i) {
+            auto temp = computer.compute_grid_fast(tree, cfg.grid_time, cfg.grid_prob, cfg.grid_N);
+            for (size_t i = 0; i < result.size(); ++i) {
                 for (size_t j = 0; j < cfg.grid_prob.size(); ++j) {
                     result[i][j] += temp[i][j];
                 }
