@@ -3,12 +3,79 @@
 #include <map>
 #include <cmath>
 #include <algorithm>
+#include <mdspan>
 #include <tskit.h>
 
 #include <iostream>
 
 namespace treellh
 {
+    using DoubleMatrixView = std::mdspan<double, std::dextents<size_t, 2>>;
+    using IntMatrixView = std::mdspan<int, std::dextents<size_t, 2>>;
+    using DoubleTensor3DView = std::mdspan<double, std::dextents<size_t, 3>>;
+
+    class DenseMatrix
+    {
+        private:
+            size_t rows_ = 0;
+            size_t cols_ = 0;
+            std::vector<double> data_;
+        public:
+            DenseMatrix() = default;
+            DenseMatrix(size_t rows, size_t cols, double value = 0)
+                : rows_(rows), cols_(cols), data_(rows * cols, value) {}
+
+            size_t rows() const { return rows_; }
+            size_t cols() const { return cols_; }
+            size_t size() const { return data_.size(); }
+            const std::vector<double>& data() const { return data_; }
+            std::vector<double>& data() { return data_; }
+
+            DoubleMatrixView view() { return DoubleMatrixView(data_.data(), rows_, cols_); }
+            std::mdspan<const double, std::dextents<size_t, 2>> view() const
+            {
+                return std::mdspan<const double, std::dextents<size_t, 2>>(data_.data(), rows_, cols_);
+            }
+
+            double& operator()(size_t row, size_t col) { return data_[row * cols_ + col]; }
+            double operator()(size_t row, size_t col) const { return data_[row * cols_ + col]; }
+    };
+
+    class DenseTensor3D
+    {
+        private:
+            size_t dim0_ = 0;
+            size_t dim1_ = 0;
+            size_t dim2_ = 0;
+            std::vector<double> data_;
+        public:
+            DenseTensor3D() = default;
+            DenseTensor3D(size_t dim0, size_t dim1, size_t dim2, double value = 0)
+                : dim0_(dim0), dim1_(dim1), dim2_(dim2), data_(dim0 * dim1 * dim2, value) {}
+
+            size_t dim0() const { return dim0_; }
+            size_t dim1() const { return dim1_; }
+            size_t dim2() const { return dim2_; }
+            size_t size() const { return data_.size(); }
+            const std::vector<double>& data() const { return data_; }
+            std::vector<double>& data() { return data_; }
+
+            DoubleTensor3DView view() { return DoubleTensor3DView(data_.data(), dim0_, dim1_, dim2_); }
+            std::mdspan<const double, std::dextents<size_t, 3>> view() const
+            {
+                return std::mdspan<const double, std::dextents<size_t, 3>>(data_.data(), dim0_, dim1_, dim2_);
+            }
+
+            double& operator()(size_t i, size_t j, size_t k)
+            {
+                return data_[(i * dim1_ + j) * dim2_ + k];
+            }
+            double operator()(size_t i, size_t j, size_t k) const
+            {
+                return data_[(i * dim1_ + j) * dim2_ + k];
+            }
+    };
+
     class CoalTable
     {
         private:
@@ -96,10 +163,10 @@ namespace treellh
             double smart_llh(double, double, 
                 std::span<const int>, std::span<int>);
             double smart_llh_to_nodes(double, double, 
-                std::span<const int>, std::span<int>, std::span<double>, std::span<int>,
+                std::span<const int>, std::span<int>, DoubleMatrixView, IntMatrixView,
                 const std::vector<std::vector<double>>&, size_t);
 
-            std::vector<std::vector<double>> compute_grid_fast(
+            DenseTensor3D compute_grid_fast(
                 const tsk_tree_t &, std::vector<double>, std::vector<double>,
                 std::vector<std::vector<double>> = {});
 

@@ -252,34 +252,34 @@ std::string default_output_name(const std::string &input, const std::string &mod
     return path.replace_extension(ext).string();
 }
 
-void save_matrix_bin(const std::string &filename, const std::vector<std::vector<double>> &matrix)
+void save_matrix_bin(const std::string &filename, const treellh::DenseTensor3D &tensor)
 {
-    std::vector<double> flat;
-    for (const auto &row : matrix) {
-        flat.insert(flat.end(), row.begin(), row.end());
-    }
-
     std::ofstream file(filename, std::ios::binary);
     if (!file) {
         throw std::runtime_error("cannot open output file: " + filename);
     }
-    file.write(reinterpret_cast<const char *>(flat.data()), static_cast<std::streamsize>(flat.size() * sizeof(double)));
+    file.write(
+        reinterpret_cast<const char *>(tensor.data().data()),
+        static_cast<std::streamsize>(tensor.size() * sizeof(double))
+    );
 }
 
-void save_matrix_text(const std::string &filename, const std::vector<std::vector<double>> &matrix)
+void save_matrix_text(const std::string &filename, const treellh::DenseTensor3D &tensor)
 {
     std::ofstream file(filename);
     if (!file) {
         throw std::runtime_error("cannot open output file: " + filename);
     }
-    for (const auto &row : matrix) {
-        for (size_t j = 0; j < row.size(); ++j) {
-            if (j != 0) {
-                file << ' ';
+    for (size_t time_i = 0; time_i < tensor.dim0(); ++time_i) {
+        for (size_t n_i = 0; n_i < tensor.dim1(); ++n_i) {
+            for (size_t prob_i = 0; prob_i < tensor.dim2(); ++prob_i) {
+                if (prob_i != 0) {
+                    file << ' ';
+                }
+                file << tensor(time_i, n_i, prob_i);
             }
-            file << row[j];
+            file << '\n';
         }
-        file << '\n';
     }
 }
 
@@ -323,7 +323,7 @@ double compute_llh_file(const Config &cfg, const std::string &input)
     return result;
 }
 
-std::vector<std::vector<double>> compute_grid_file(const Config &cfg, const std::string &input)
+treellh::DenseTensor3D compute_grid_file(const Config &cfg, const std::string &input)
 {
     tsk_treeseq_t ts = load_ts(input);
     treellh::Scenario_Computer computer(ts, cfg.parameters, cfg.sample_population, cfg.admixed_index, cfg.outgroup_index);
@@ -336,10 +336,7 @@ std::vector<std::vector<double>> compute_grid_file(const Config &cfg, const std:
     for (const auto &values : cfg.grid_N) {
         N_grid_size = std::max(N_grid_size, values.size());
     }
-    std::vector<std::vector<double>> result(
-        cfg.grid_time.size() * N_grid_size,
-        std::vector<double>(cfg.grid_prob.size(), 0)
-    );
+    treellh::DenseTensor3D result(cfg.grid_time.size(), N_grid_size, cfg.grid_prob.size(), 0);
     double seq_len = tsk_treeseq_get_sequence_length(&ts);
     double step = seq_len / static_cast<double>(cfg.tree_num);
     double left_x = -step - 1;
@@ -350,9 +347,11 @@ std::vector<std::vector<double>> compute_grid_file(const Config &cfg, const std:
         if (tree.interval.left - left_x > step) {
             print_progress(tree_c++, cfg.tree_num);
             auto temp = computer.compute_grid_fast(tree, cfg.grid_time, cfg.grid_prob, cfg.grid_N);
-            for (size_t i = 0; i < result.size(); ++i) {
-                for (size_t j = 0; j < cfg.grid_prob.size(); ++j) {
-                    result[i][j] += temp[i][j];
+            for (size_t time_i = 0; time_i < result.dim0(); ++time_i) {
+                for (size_t n_i = 0; n_i < result.dim1(); ++n_i) {
+                    for (size_t prob_i = 0; prob_i < result.dim2(); ++prob_i) {
+                        result(time_i, n_i, prob_i) += temp(time_i, n_i, prob_i);
+                    }
                 }
             }
             left_x = tree.interval.left;

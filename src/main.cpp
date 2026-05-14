@@ -58,15 +58,10 @@ void print_llh(const std::vector<double> &llh)
     }
 }
 
-void save_matrix_bin(std::string filename, const std::vector<std::vector<double>> mtx)
+void save_matrix_bin(std::string filename, const treellh::DenseTensor3D &mtx)
 {
-    std::vector<double> flat;
-    for (const auto& row : mtx) {
-        flat.insert(flat.end(), row.begin(), row.end());
-    }
-
     std::ofstream file(filename, std::ios::binary);
-    file.write(reinterpret_cast<const char*>(flat.data()), flat.size() * sizeof(double));
+    file.write(reinterpret_cast<const char*>(mtx.data().data()), mtx.size() * sizeof(double));
     file.close();
 }
 
@@ -220,8 +215,8 @@ int compute_llh_for_sample(
         // std::vector<double> mig_prob = linspace(0.01, 0.01, n);
 
         // правдоподобие сюда
-        std::vector<std::vector<double>> result(migration_time.size(), std::vector<double>(migratioh_prob.size(), 0));
-        std::vector<std::vector<double>> temp;
+        treellh::DenseTensor3D result(migration_time.size(), 1, migratioh_prob.size(), 0);
+        treellh::DenseTensor3D temp;
         // рабочий цикл
         double seq_len = tsk_treeseq_get_sequence_length(&ts);
         double step = seq_len / double(tree_num);
@@ -240,7 +235,7 @@ int compute_llh_for_sample(
                 {
                     for (size_t j = 0; j < migratioh_prob.size(); ++j)
                     {            
-                        result[i][j] += temp[i][j];
+                        result(i, 0, j) += temp(i, 0, j);
                     }
                 }
                 left_x = tree.interval.left;
