@@ -1,6 +1,5 @@
 #include <vector>
 #include <span>
-#include <map>
 #include <cmath>
 #include <algorithm>
 #include <mdspan>
@@ -151,7 +150,7 @@ namespace treellh
 
             int set_subtree_population(const tsk_tree_t&, tsk_id_t, int, double);
             int set_outgroup(const tsk_tree_t&, tsk_id_t*, tsk_size_t);
-            int set_scenario(const tsk_tree_t&, int);
+            int set_scenario(const tsk_tree_t&, uint64_t);
             int check_scenario(const tsk_tree_t&);
             int check_imposible_split_2(const tsk_tree_t&);
 
@@ -164,7 +163,9 @@ namespace treellh
                 std::span<const int>, std::span<int>);
             double smart_llh_to_nodes(double, double, 
                 std::span<const int>, std::span<int>, DoubleMatrixView, IntMatrixView,
-                const std::vector<std::vector<double>>&, size_t);
+                std::mdspan<const double, std::dextents<size_t, 2>>,
+                std::mdspan<const double, std::dextents<size_t, 2>>,
+                std::span<double>, size_t);
 
             DenseTensor3D compute_grid_fast(
                 const tsk_tree_t &, std::vector<double>, std::vector<double>,

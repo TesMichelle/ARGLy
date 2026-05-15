@@ -2,7 +2,10 @@ project('treellh', ['cpp'],
   default_options: [
     'cpp_std=c++23', 
     'warning_level=3', 
-    'werror=true'])
+    'werror=true',
+    'optimization=3',
+    'debug=false',
+    'b_ndebug=true'])
 
 
 tskit_proj = subproject('tskit')
@@ -15,4 +18,3 @@ lib_deps = [tskit_dep]
 treellh_inc = [tskit_inc, include_directories('.')]
 treellh = static_library('treellh', 'treellh.cpp', dependencies: lib_deps)
 treellh_dep = declare_dependency(link_with : treellh, include_directories: treellh_inc)
-
