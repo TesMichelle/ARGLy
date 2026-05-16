@@ -591,8 +591,8 @@ namespace treellh
         std::span<int> lineages_num, 
         DoubleMatrixView nodes_llh,
         IntMatrixView nodes_lineage_num,
-        std::mdspan<const double, std::dextents<size_t, 2>> inv_2N_grid,
-        std::mdspan<const double, std::dextents<size_t, 2>> log_inv_2N_grid,
+        DoubleMatrixView inv_2N_grid,
+        DoubleMatrixView log_inv_2N_grid,
         std::span<double> llh_step,
         size_t N_grid_size
     )
@@ -632,23 +632,23 @@ namespace treellh
                 {
                     if (cur_node_id != -1)
                     {
-                        llh_step[n_i] = log_inv_2N_grid[populations[cur_pop_i], n_i]
-                            + nodes_llh[cur_node_id, n_i];
+                        llh_step[n_i] = log_inv_2N_grid(populations[cur_pop_i], n_i)
+                            + nodes_llh(cur_node_id, n_i);
                     }
                     for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                     {
                         llh_step[n_i] += (
-                            -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. * inv_2N_grid[populations[pop_i], n_i]
+                            -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. * inv_2N_grid(populations[pop_i], n_i)
                             * (current_time - nodes_[next_node_id].time)
                         );
                     }
 
-                    nodes_llh[next_node_id, n_i] += llh_step[n_i];
+                    nodes_llh(next_node_id, n_i) += llh_step[n_i];
                 }
 
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
-                    nodes_lineage_num[next_node_id, pop_i] = lineages_num[pop_i];
+                    nodes_lineage_num(next_node_id, pop_i) = lineages_num[pop_i];
                 }
 
                 cur_node_id = next_node_id;
@@ -674,26 +674,26 @@ namespace treellh
         {
             if (cur_node_id != -1) // it means we have coalescence in some population
             {
-                llh_step[n_i] = log_inv_2N_grid[populations[cur_pop_i], n_i]
-                    + nodes_llh[cur_node_id, n_i];
+                llh_step[n_i] = log_inv_2N_grid(populations[cur_pop_i], n_i)
+                    + nodes_llh(cur_node_id, n_i);
             }
             for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
             {
                 llh_step[n_i] += (
-                    -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. * inv_2N_grid[populations[pop_i], n_i]
+                    -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. * inv_2N_grid(populations[pop_i], n_i)
                     * (current_time - time_end) // current_time = start_time if no coalescence obtained.
                 );  
             }
-            nodes_llh[next_node_id, n_i] += llh_step[n_i];
+            nodes_llh(next_node_id, n_i) += llh_step[n_i];
         }
 
         for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
         {
             // std::cout << pop_i << " " << lineages_num[pop_i] << ", ";
-            nodes_lineage_num[next_node_id, pop_i] = lineages_num[pop_i];
+            nodes_lineage_num(next_node_id, pop_i) = lineages_num[pop_i];
         }
         // std::cout << std::endl;
-        return nodes_llh[next_node_id, 0];
+        return nodes_llh(next_node_id, 0);
     }
 
     int Scenario_Computer::debug_sort_by_time(const tsk_tree_t &tree)
@@ -757,8 +757,8 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
             {
                 const double N_value = grid_N_value(N, static_cast<int>(pop_i), n_i);
-                inv_2N[pop_i, n_i] = 0.5 / N_value;
-                log_inv_2N[pop_i, n_i] = std::log(inv_2N[pop_i, n_i]);
+                inv_2N(pop_i, n_i) = 0.5 / N_value;
+                log_inv_2N(pop_i, n_i) = std::log(inv_2N(pop_i, n_i));
             }
         }
 
@@ -878,20 +878,20 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             {
                 const tsk_id_t node_id = time_ordered_tree_nodes_ids_[i];
                 const tsk_id_t min_node_id = time_ordered_tree_nodes_ids_[min_llh_i];
-                if (no_structure_llh[node_id, n_i] != 0)
+                if (no_structure_llh(node_id, n_i) != 0)
                 {
-                    if (no_structure_llh[node_id, n_i] < no_structure_llh[min_node_id, n_i])
+                    if (no_structure_llh(node_id, n_i) < no_structure_llh(min_node_id, n_i))
                         min_llh_i = i;
                 }
             }
 
-            double A = no_structure_llh[time_ordered_tree_nodes_ids_[min_llh_i], n_i];
+            double A = no_structure_llh(time_ordered_tree_nodes_ids_[min_llh_i], n_i);
 
             for (size_t i = min_llh_i + 1; i-- > 0;)
             {
                 const tsk_id_t node_id = time_ordered_tree_nodes_ids_[i];
-                no_structure_llh[node_id, n_i] = - (
-                    no_structure_llh[node_id, n_i] - A
+                no_structure_llh(node_id, n_i) = - (
+                    no_structure_llh(node_id, n_i) - A
                 );
             }
         }
@@ -989,7 +989,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                         {
                             for (size_t j = 0; j < migration_prob.size(); ++j)
                             {
-                                result[i, n_i, j] = llh_root[n_i] + no_structure_llh[node_id, n_i];
+                                result(i, n_i, j) = llh_root[n_i] + no_structure_llh(node_id, n_i);
                             }
                         }
                     }
@@ -997,33 +997,33 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                 }
 
                 lineages_num_total = 0;
-                lineages_between[0] = structure_lineage_num[node_id, 0]; 
-                lineages_between[1] = structure_lineage_num[node_id, 1]; 
+                lineages_between[0] = structure_lineage_num(node_id, 0); 
+                lineages_between[1] = structure_lineage_num(node_id, 1); 
                 if (split_2_time_ <= nodes_[prev_node_id].time) // prev_time <= split_2 <= migration <= node_time
                     lineages_between[0] += lower_split_2_out_linages_num_;
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
-                    lineages_num_total += structure_lineage_num[node_id, pop_i];
+                    lineages_num_total += structure_lineage_num(node_id, pop_i);
                 }
 
                 for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
                 {
-                    llh_step = log_inv_2N[nodes_[prev_node_id].population, n_i];
+                    llh_step = log_inv_2N(nodes_[prev_node_id].population, n_i);
                     for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                     {
                         llh_step += (
-                            -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. * inv_2N[populations[pop_i], n_i] 
+                            -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. * inv_2N(populations[pop_i], n_i) 
                             * (nodes_[prev_node_id].time - split_2_time_) // between prev_time and split.
                         );
                         llh_step += (
-                            -structure_lineage_num[node_id, pop_i] * (structure_lineage_num[node_id, pop_i] - 1) / 2. * inv_2N[populations[pop_i], n_i] 
+                            -structure_lineage_num(node_id, pop_i) * (structure_lineage_num(node_id, pop_i) - 1) / 2. * inv_2N(populations[pop_i], n_i) 
                             * (split_2_time_ - t) // between split and migration removing splited lineages.
                         );
                     }
 
-                    llh_for_sc = structure_llh[prev_node_id, n_i] + llh_step;
-                    const int base_lineages = structure_lineage_num[node_id, 0];
-                    const int ghost_lineages = structure_lineage_num[node_id, 1];
+                    llh_for_sc = structure_llh(prev_node_id, n_i) + llh_step;
+                    const int base_lineages = structure_lineage_num(node_id, 0);
+                    const int ghost_lineages = structure_lineage_num(node_id, 1);
                     for (size_t j = 0; j < migration_prob.size(); ++j)
                     {
                         if (migration_prob_kind[j] == 1)
@@ -1039,18 +1039,18 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                             mig_prob = base_lineages * log_no_migration_prob[j]
                                 + ghost_lineages * log_migration_prob[j];
                         }
-                        result[i, n_i, j] += std::exp(llh_for_sc + mig_prob);
+                        result(i, n_i, j) += std::exp(llh_for_sc + mig_prob);
                     }
                     if (sc_i == abacaba.size() - 1)
                     {
                         llh_step_r = (
-                            -lineages_num_total * (lineages_num_total - 1) / 2. * inv_2N[base_pop_index_, n_i]
+                            -lineages_num_total * (lineages_num_total - 1) / 2. * inv_2N(base_pop_index_, n_i)
                             * (t - nodes_[node_id].time) // current_time = start_time if no coalescence obtained.
                         );
                         for (size_t j = 0; j < migration_prob.size(); ++j)
                         {
-                            result[i, n_i, j] = llh_root[n_i] + std::log(result[i, n_i, j])
-                                + no_structure_llh[node_id, n_i]
+                            result(i, n_i, j) = llh_root[n_i] + std::log(result(i, n_i, j))
+                                + no_structure_llh(node_id, n_i)
                                 + llh_step_r;
                         }
                     }

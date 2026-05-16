@@ -27,7 +27,7 @@ TSKIT_STAMP := $(BUILD_DIR)/.tskit-unpacked
 CPPFLAGS ?=
 CFLAGS ?= -O3 -DNDEBUG
 CXXFLAGS ?= -O3 -DNDEBUG
-CXXSTD ?= -std=c++23
+CXXSTD ?= -std=c++20
 LDFLAGS ?=
 LDLIBS ?= -lm
 
@@ -55,7 +55,6 @@ TREELLH_OBJECT := $(OBJ_DIR)/treellh/treellh.o
 TSKIT_LIB := $(LIB_DIR)/libtskit.a
 KASTORE_LIB := $(LIB_DIR)/libkastore.a
 TREELLH_LIB := $(LIB_DIR)/libtreellh.a
-MDSPAN_STAMP := $(BUILD_DIR)/.check-mdspan
 
 BINARIES := $(BUILD_DIR)/argly $(BUILD_DIR)/main
 
@@ -80,13 +79,13 @@ $(TSKIT_LIB): $(TSKIT_OBJECTS) | $(LIB_DIR)
 $(KASTORE_LIB): $(KASTORE_OBJECT) | $(LIB_DIR)
 	$(AR) rcs $@ $^
 
-$(OBJ_DIR)/argly_cli.o: $(MDSPAN_STAMP) $(TSKIT_STAMP) $(SRC_DIR)/argly_cli.cpp $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)
+$(OBJ_DIR)/argly_cli.o: $(TSKIT_STAMP) $(SRC_DIR)/argly_cli.cpp $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(SRC_DIR)/argly_cli.cpp -o $@
 
-$(OBJ_DIR)/main.o: $(MDSPAN_STAMP) $(TSKIT_STAMP) $(SRC_DIR)/main.cpp $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)
+$(OBJ_DIR)/main.o: $(TSKIT_STAMP) $(SRC_DIR)/main.cpp $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(SRC_DIR)/main.cpp -o $@
 
-$(OBJ_DIR)/treellh/treellh.o: $(MDSPAN_STAMP) $(TSKIT_STAMP) $(TREELLH_CPP_SOURCE) $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)/treellh
+$(OBJ_DIR)/treellh/treellh.o: $(TSKIT_STAMP) $(TREELLH_CPP_SOURCE) $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)/treellh
 	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(TREELLH_CPP_SOURCE) -o $@
 
 $(OBJ_DIR)/tskit/%.o: $(TSKIT_STAMP) $(TSKIT_DIR)/tskit/%.c | $(OBJ_DIR)/tskit
@@ -107,23 +106,6 @@ $(TSKIT_ARCHIVE):
 	else \
 		printf '%s  %s\n' '$(TSKIT_SHA256)' '$@' | sha256sum -c -; \
 	fi
-
-$(MDSPAN_STAMP): | $(BUILD_DIR)
-	printf '%s\n' \
-		'#include <cstddef>' \
-		'#include <mdspan>' \
-		'int main() {' \
-		'  double data[4]{};' \
-		'  std::mdspan<double, std::dextents<std::size_t, 2>> view(data, 2, 2);' \
-		'  return view.extent(0) == 2 ? 0 : 1;' \
-		'}' \
-		| $(CXX) $(CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -x c++ -o /dev/null - >/dev/null 2>&1 || { \
-			echo "error: $(CXX) with $(CXXSTD) cannot compile <mdspan>."; \
-			echo "       Use GCC/libstdc++ 14+ or another C++23 compiler with std::mdspan."; \
-			echo "       Example: make CXX=g++-14, or try make CXXSTD=-std=gnu++23."; \
-			exit 1; \
-		}
-	touch $@
 
 $(BUILD_DIR) $(OBJ_DIR) $(OBJ_DIR)/treellh $(OBJ_DIR)/tskit $(OBJ_DIR)/kastore $(LIB_DIR):
 	$(MKDIR_P) $@

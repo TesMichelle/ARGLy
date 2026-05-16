@@ -19,14 +19,13 @@ Useful options:
 ```sh
 make CXX=g++ CC=gcc
 make CXX=g++-14 CC=gcc-14
-make CXXSTD=-std=gnu++23
+make CXXSTD=-std=gnu++20
 make install PREFIX="$HOME/.local"
 make clean
 ```
 
-The code uses C++23 `std::mdspan`. The Makefile checks this before compiling
-the project and prints a clear error if the selected compiler/libstdc++ does
-not provide `<mdspan>`. GCC/libstdc++ 14+ should work.
+The code requires C++20 because it uses `std::span`; it does not require
+`std::mdspan`.
 
 The old Meson build is still available if needed. Requirements: Meson, Ninja,
 and a C/C++ compiler.

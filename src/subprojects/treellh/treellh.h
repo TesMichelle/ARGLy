@@ -2,16 +2,55 @@
 #include <span>
 #include <cmath>
 #include <algorithm>
-#include <mdspan>
+#include <cstddef>
 #include <tskit.h>
 
 #include <iostream>
 
 namespace treellh
 {
-    using DoubleMatrixView = std::mdspan<double, std::dextents<size_t, 2>>;
-    using IntMatrixView = std::mdspan<int, std::dextents<size_t, 2>>;
-    using DoubleTensor3DView = std::mdspan<double, std::dextents<size_t, 3>>;
+    template <typename T>
+    class MatrixView
+    {
+        private:
+            T *data_;
+            size_t rows_;
+            size_t cols_;
+        public:
+            MatrixView(T *data, size_t rows, size_t cols)
+                : data_(data), rows_(rows), cols_(cols) {}
+
+            size_t rows() const { return rows_; }
+            size_t cols() const { return cols_; }
+            T& operator()(size_t row, size_t col) const { return data_[row * cols_ + col]; }
+    };
+
+    template <typename T>
+    class Tensor3DView
+    {
+        private:
+            T *data_;
+            size_t dim0_;
+            size_t dim1_;
+            size_t dim2_;
+        public:
+            Tensor3DView(T *data, size_t dim0, size_t dim1, size_t dim2)
+                : data_(data), dim0_(dim0), dim1_(dim1), dim2_(dim2) {}
+
+            size_t dim0() const { return dim0_; }
+            size_t dim1() const { return dim1_; }
+            size_t dim2() const { return dim2_; }
+            T& operator()(size_t i, size_t j, size_t k) const
+            {
+                return data_[(i * dim1_ + j) * dim2_ + k];
+            }
+    };
+
+    using DoubleMatrixView = MatrixView<double>;
+    using ConstDoubleMatrixView = MatrixView<const double>;
+    using IntMatrixView = MatrixView<int>;
+    using DoubleTensor3DView = Tensor3DView<double>;
+    using ConstDoubleTensor3DView = Tensor3DView<const double>;
 
     class DenseMatrix
     {
@@ -31,9 +70,9 @@ namespace treellh
             std::vector<double>& data() { return data_; }
 
             DoubleMatrixView view() { return DoubleMatrixView(data_.data(), rows_, cols_); }
-            std::mdspan<const double, std::dextents<size_t, 2>> view() const
+            ConstDoubleMatrixView view() const
             {
-                return std::mdspan<const double, std::dextents<size_t, 2>>(data_.data(), rows_, cols_);
+                return ConstDoubleMatrixView(data_.data(), rows_, cols_);
             }
 
             double& operator()(size_t row, size_t col) { return data_[row * cols_ + col]; }
@@ -60,9 +99,9 @@ namespace treellh
             std::vector<double>& data() { return data_; }
 
             DoubleTensor3DView view() { return DoubleTensor3DView(data_.data(), dim0_, dim1_, dim2_); }
-            std::mdspan<const double, std::dextents<size_t, 3>> view() const
+            ConstDoubleTensor3DView view() const
             {
-                return std::mdspan<const double, std::dextents<size_t, 3>>(data_.data(), dim0_, dim1_, dim2_);
+                return ConstDoubleTensor3DView(data_.data(), dim0_, dim1_, dim2_);
             }
 
             double& operator()(size_t i, size_t j, size_t k)
@@ -163,8 +202,8 @@ namespace treellh
                 std::span<const int>, std::span<int>);
             double smart_llh_to_nodes(double, double, 
                 std::span<const int>, std::span<int>, DoubleMatrixView, IntMatrixView,
-                std::mdspan<const double, std::dextents<size_t, 2>>,
-                std::mdspan<const double, std::dextents<size_t, 2>>,
+                DoubleMatrixView,
+                DoubleMatrixView,
                 std::span<double>, size_t);
 
             DenseTensor3D compute_grid_fast(
