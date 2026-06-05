@@ -1,23 +1,3 @@
-/*
- * [Разработчик] -> [Тестировщик, Тимлид]:
- * Оптимизированный расчёт ARG likelihood (v2)
- *
- * Реализованные оптимизации:
- *   1. Fixed-node precomputation — узлы вне bf-поддеревьев считаются один раз
- *   2. Phase-split — nodes разделены на phase1 (T_MIG,T_SEP] и phase2 (T_SEP,T_INTRO]
- *   3. Предвычисление log-констант и обратных величин
- *   4. double вместо long double (IEEE 754, ~15 significant digits)
- *   5. Log-sum-exp для численной стабильности
- *   6. Один проход по каждой фазе вместо двух полных проходов
- *   7. OpenMP-параллелизм по деревьям (сохранён)
- *
- * Компиляция:
- *   g++ -O3 -march=native -fopenmp -DTIME -o prog_opt2 likelihood_opt2.cpp -ltskit
- *
- * Запуск:
- *   ./prog_opt2 <T_MIG> <N_GHOST>
- */
-
 extern "C" {
 #include <tskit.h>
 }
@@ -426,11 +406,7 @@ int main(int argc, char *argv[]) {
         const size_t n_p1 = task.phase1_times.size();
         const size_t n_p2 = task.phase2_times.size();
 
-        // Safety check to avoid massive memory allocation
-        if (M_act >= 31) {
-            // std::cerr << "Warning: M_active too large (" << M_act << "), skipping combinations" << std::endl;
-            continue;
-        }
+
 
         std::vector<double> log_probs;
         log_probs.reserve(max_mask * n_dp);
