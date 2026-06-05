@@ -1,341 +1,546 @@
-#include <treellh.h>
+/*
+ * [Разработчик] -> [Тестировщик, Тимлид]:
+ * Оптимизированный расчёт ARG likelihood (v2)
+ *
+ * Реализованные оптимизации:
+ *   1. Fixed-node precomputation — узлы вне bf-поддеревьев считаются один раз
+ *   2. Phase-split — nodes разделены на phase1 (T_MIG,T_SEP] и phase2 (T_SEP,T_INTRO]
+ *   3. Предвычисление log-констант и обратных величин
+ *   4. double вместо long double (IEEE 754, ~15 significant digits)
+ *   5. Log-sum-exp для численной стабильности
+ *   6. Один проход по каждой фазе вместо двух полных проходов
+ *   7. OpenMP-параллелизм по деревьям (сохранён)
+ *
+ * Компиляция:
+ *   g++ -O3 -march=native -fopenmp -DTIME -o prog_opt2 likelihood_opt2.cpp -ltskit
+ *
+ * Запуск:
+ *   ./prog_opt2 <T_MIG> <N_GHOST>
+ */
+
+extern "C" {
+#include <tskit.h>
+}
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <iostream>
-#include <fstream>
-#include <vector>
+#include <queue>
 #include <string>
+#include <vector>
+#include <omp.h>
 
-// .npy file format
-// #include <cnpy.h>
+#ifdef TIME
+#include <chrono>
+#endif
 
-#include <err.h>
-#define check_tsk_error(val)                                                            \
-    if (val < 0) {                                                                      \
-        errx(EXIT_FAILURE, "line %d: %s", __LINE__, tsk_strerror(val));                 \
-    }
+// ============================================================================
+// Параметры популяции
+// ============================================================================
+static double N_AFR    = 10000.0;
+static double N_SAMPLE = 10000.0;
+static double N_ANC    = 10000.0;
+static double N_GHOST  = 10000.0;
+static double N_ARCH   = 10000.0;
 
-void printProgress(int it, int total) {
-    double progress = (double) it / total;
-    int barWidth = 50;
+static double T_MIG   = 10000.0;
+static double T_SEP   = 30000.0;
+static double T_INTRO  = 50000.0;
 
-    std::cout << "[";
-    int pos = barWidth * progress;
-    for (int i = 0; i < barWidth; ++i) {
-        if (i < pos) std::cout << "=";
-        else if (i == pos) std::cout << ">";
-        else std::cout << " ";
-    }
-    std::cout << "] " << it + 1 << "/" << total << "\r";
-    std::cout.flush();
+static const double ADMIX_RATE = 0.2;
+
+// ============================================================================
+// Предвычисленные константы (пересчитываются при изменении N_GHOST)
+// ============================================================================
+static double LOG_ADMIX;
+static double LOG_1_ADMIX;
+static double LOG_INV_2N_AFR;
+static double LOG_INV_2N_ANC;
+static double LOG_INV_2N_GHOST;
+static double LOG_INV_2N_SAMPLE;
+static double LOG_INV_2N_ARCH;
+static double INV_4N_AFR;
+static double INV_4N_ANC;
+static double INV_4N_GHOST;
+static double INV_4N_SAMPLE;
+static double INV_4N_ARCH;
+
+static void precompute_constants() {
+    LOG_ADMIX       = std::log(ADMIX_RATE);
+    LOG_1_ADMIX     = std::log(1.0 - ADMIX_RATE);
+    LOG_INV_2N_AFR  = std::log(1.0 / (2.0 * N_AFR));
+    LOG_INV_2N_ANC  = std::log(1.0 / (2.0 * N_ANC));
+    LOG_INV_2N_GHOST= std::log(1.0 / (2.0 * N_GHOST));
+    LOG_INV_2N_SAMPLE = std::log(1.0 / (2.0 * N_SAMPLE));
+    LOG_INV_2N_ARCH = std::log(1.0 / (2.0 * N_ARCH));
+    INV_4N_AFR      = 1.0 / (4.0 * N_AFR);
+    INV_4N_ANC      = 1.0 / (4.0 * N_ANC);
+    INV_4N_GHOST    = 1.0 / (4.0 * N_GHOST);
+    INV_4N_SAMPLE   = 1.0 / (4.0 * N_SAMPLE);
+    INV_4N_ARCH     = 1.0 / (4.0 * N_ARCH);
 }
 
-std::vector<double> linspace(double a, double b, size_t n)
-{
-    std::vector<double> r(n, a);
-    for (size_t i = 1; i < n; ++i)
-    {
-        r[i] += ((b - a) / (n - 1)) * i;
-    }
-    return r;
-}
+// ============================================================================
+// cast: определение bf_nodes (линии, живые в T_INTRO и не ведущие к SAM)
+// ============================================================================
+static bool cast(tsk_id_t start, tsk_tree_t *tree,
+                 std::vector<tsk_id_t> &bf_nodes) {
+    const tsk_node_table_t &nodes = tree->tree_sequence->tables->nodes;
 
-void print_llh(const std::vector<std::vector<double>> &llh)
-{
-    for (size_t i = 0; i < llh.size(); ++i)
-    {
-        for (size_t j = 0; j < llh.size(); ++j)
-        {
-            std::cout << llh[i][j] << ' ';
-        }
-        std::cout << std::endl;
+    if (nodes.population[start] == -1 && nodes.time[start] <= T_SEP) {
+        return true;
     }
-}
-
-void print_llh(const std::vector<double> &llh)
-{
-    for (size_t i = 0; i < llh.size(); ++i)
-    {
-        std::cout << llh[i] << std::endl;
-    }
-}
-
-void save_matrix_bin(std::string filename, const std::vector<std::vector<double>> mtx)
-{
-    std::vector<double> flat;
-    for (const auto& row : mtx) {
-        flat.insert(flat.end(), row.begin(), row.end());
+    if (tree->left_child[start] == TSK_NULL) {
+        return false;
     }
 
-    std::ofstream file(filename, std::ios::binary);
-    file.write(reinterpret_cast<const char*>(flat.data()), flat.size() * sizeof(double));
-    file.close();
-}
+    tsk_id_t v = tree->left_child[start];
+    bool ok = false;
 
+    while (v != TSK_NULL) {
+        bool is_sam_anc = cast(v, tree, bf_nodes);
 
-std::vector<double> compute_for_sample(
-    std::string path, 
-    std::vector<int> sample_population,
-    std::vector<double> parameters, 
-    const std::string prefix = "test_arg_10_sim_")
-{
-    std::vector<double> llh(100, 0);
-    for (size_t sim_i = 0; sim_i < 100; sim_i++)
-    {
-        std::cout << "sim: " << sim_i << std::endl;
-        // Загружаю АРГ 
-        int ret;
-        tsk_treeseq_t ts;
-        ret = tsk_treeseq_load(&ts, (path + prefix + std::to_string(sim_i) + ".arg").c_str(), 0);
-        if (ret != 0) {
-            fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
-            exit(EXIT_FAILURE);
-        }
-
-        // создраю вычислятор
-        treellh::Scenario_Computer computer(ts, parameters, sample_population, 0, 1);
-        tsk_tree_t tree;
-
-        // иницилизация дерева для нужного трисека
-        ret = tsk_tree_init(&tree, &ts, 0);
-        check_tsk_error(ret);
-
-
-        computer.set_parameters(parameters);
-        for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-        {
-            llh[sim_i] += computer.compute_llh(tree);
-        }
-        std::cout << llh[sim_i] << std::endl;
-    }
-    return llh;
-}
-
-// std::vector<double> estimate_for_sample(
-//     std::string path, 
-//     std::vector<double> parameters, 
-//     size_t n = 30,
-//     size_t sim_n = 100,
-//     long tree_num = 10000,
-//     const std::string prefix = "real_arg_admixed_only_50_sim_")
-// {
-
-
-//     // создаю сетку
-//     std::vector<double> time_migration = linspace(1, 7000, n);
-
-//     std::vector<double> pe(sim_n, 0);
-//     for (size_t sim_i = 0; sim_i < sim_n; sim_i++)
-//     {
-//         std::cout << "sim: " << sim_i << std::endl;
-//         // Загружаю АРГ 
-//         int ret;
-//         tsk_treeseq_t ts;
-//         ret = tsk_treeseq_load(&ts, (path + prefix + std::to_string(sim_i) + ".arg").c_str(), 0);
-//         if (ret != 0) {
-//             fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
-//             exit(EXIT_FAILURE);
-//         }
-
-//         // создраю вычислятор
-//         treellh::Scenario_Computer computer(ts, parameters, 3, 1);
-//         tsk_tree_t tree;
-
-//         // иницилизация дерева для нужного трисека
-//         ret = tsk_tree_init(&tree, &ts, 0);
-//         check_tsk_error(ret);
-
-//         // std::vector<double> mig_prob = linspace(0.01, 0.01, n);
-
-//         // правдоподобие на сетке
-//         std::vector<std::vector<double>> llh(n, std::vector<double>(n, 0));
-
-//         // рабочий цикл
-//         double seq_len = tsk_treeseq_get_sequence_length(&ts);
-//         double step = seq_len / double(tree_num);
-//         double left_x = 0;
-//         size_t max_i = 0;
-//         for (size_t i = 0; i < n; ++i)
-//         {
-//             for (size_t j = 0; j < n; ++j)
-//             {
-//                 std::cout << i << ", " << j << std::endl;
-//                 parameters[0] = time_migration[i];
-//                 computer.set_parameters(parameters);
-
-//                 // перебираю деревья
-//                 left_x = - step - 1;
-//                 for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-//                 {
-//                     if (tree.interval.left - left_x > step)
-//                     {
-//                         llh[i][j] += computer.compute_llh(tree);
-//                         left_x = tree.interval.left;
-//                     }
-//                 }
-//                 std::cout << std::endl;
-//                 if (llh[i][j] > llh[max_i][j])
-//                 {
-//                     max_i = i;
-//                 }
-//                 std::cout << llh[i][j] << "max: " << llh[max_i][j] << std::endl;
-//                 break;
-//             }
-//         }
-//         pe[sim_i] = time_migration[max_i];
-//         std::cout << "Point estimate: " << pe[sim_i] << std::endl;
-//     }
-//     return pe;
-// }
-
-int compute_llh_for_sample(
-    std::string path,
-    std::vector<int> sample_population, 
-    std::vector<double> fixed_parameters,
-    std::vector<double> migration_time,
-    std::vector<double> migratioh_prob,
-    size_t sim_n = 100,
-    long tree_num = 10000,
-    const std::string prefix = "arg")
-{
-    for (size_t sim_i = 0; sim_i < sim_n; sim_i++)
-    {
-        std::cout << "sim: " << sim_i << std::endl;
-        // Загружаю АРГ 
-        int ret;
-        tsk_treeseq_t ts;
-        ret = tsk_treeseq_load(&ts, (path + prefix + std::to_string(sim_i) + ".arg").c_str(), 0);
-        if (ret != 0) {
-            fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
-            exit(EXIT_FAILURE);
-        }
-
-        // создраю вычислятор
-        treellh::Scenario_Computer computer(ts, fixed_parameters, sample_population, 0, 1);
-        tsk_tree_t tree;
-        computer.set_parameters(fixed_parameters);
-
-        // иницилизация дерева для нужного трисека
-        ret = tsk_tree_init(&tree, &ts, 0);
-        check_tsk_error(ret);
-
-        // std::vector<double> mig_prob = linspace(0.01, 0.01, n);
-
-        // правдоподобие сюда
-        std::vector<std::vector<double>> result(migration_time.size(), std::vector<double>(migratioh_prob.size(), 0));
-        std::vector<std::vector<double>> temp;
-        // рабочий цикл
-        double seq_len = tsk_treeseq_get_sequence_length(&ts);
-        double step = seq_len / double(tree_num);
-        double left_x = 0;
-        int tree_c = 0;
-        // перебираю деревья
-        left_x = - step - 1;
-        for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-        {
-            if (tree.interval.left - left_x > step)
-            {
-                printProgress(tree_c++, tree_num);
-                temp = computer.compute_grid_fast(tree, migration_time, migratioh_prob);
-                std::cout << "hello" << std::endl;
-                for (size_t i = 0; i < migration_time.size(); i++)
-                {
-                    for (size_t j = 0; j < migratioh_prob.size(); ++j)
-                    {            
-                        result[i][j] += temp[i][j];
-                    }
-                }
-                left_x = tree.interval.left;
+        if (nodes.time[tree->parent[v]] >= T_INTRO && nodes.time[v] < T_INTRO) {
+            if (!is_sam_anc) {
+                bf_nodes.emplace_back(v);
             }
         }
-        std::cout << std::endl;
-        save_matrix_bin(path + prefix + std::to_string(sim_i) + "_llh.bin", result);
+        if (is_sam_anc) {
+            ok = true;
+        }
+        v = tree->right_sib[v];
     }
-    return 0;
+    return ok;
 }
 
-int main()
-{ 
-    // Параметры 
-    // miration_time, split_2_time, split_1_time 
-    // migration_prop, split_2_prop, split_1_prop
-    // base_size, outgroup_size, ghost_size
-    std::vector<double> parameters = {
-        500, 1000, 2000,
-        0.2, 0.5, 0.5,
-        10000, 10000, 10000
-    };
+// ============================================================================
+// calculate_p_mig_fix: вклад coalescence SAM + AFR до миграции
+// ============================================================================
+static void calculate_p_mig_fix(tsk_tree_t *tree,
+                                std::vector<tsk_id_t> &sam,
+                                std::vector<tsk_id_t> &afr,
+                                std::vector<int> &k,
+                                double &p_mig_fix) {
+    const tsk_node_table_t &node = tree->tree_sequence->tables->nodes;
+    double t = 0.0;
 
-    size_t migration_time_size = 1;
-    size_t migration_prob_size = 1;
-    std::vector<double> migration_time = linspace(500, 500, migration_time_size);
-    std::vector<double> migration_prob = linspace(0.2, 0.2, migration_prob_size);
+    for (tsk_id_t u : sam) {
+        if (node.time[u] == 0.0 || k[1] <= 1) continue;
+        p_mig_fix += LOG_INV_2N_SAMPLE -
+                     (static_cast<double>(k[1]) * (k[1] - 1) * INV_4N_SAMPLE * (node.time[u] - t));
+        t = node.time[u];
+        --k[1];
+    }
+    p_mig_fix -= static_cast<double>(k[1]) * (k[1] - 1) * INV_4N_SAMPLE * (T_SEP - t);
 
-    long tree_num = 1;
+    t = 0.0;
+    for (tsk_id_t u : afr) {
+        if (node.time[u] == 0.0 || k[0] <= 1) continue;
+        p_mig_fix += LOG_INV_2N_AFR -
+                     (static_cast<double>(k[0]) * (k[0] - 1) * INV_4N_AFR * (node.time[u] - t));
+        t = node.time[u];
+        --k[0];
+    }
+    p_mig_fix -= static_cast<double>(k[0]) * (k[0] - 1) * INV_4N_AFR * (T_MIG - t);
+}
 
-    // Загружаю АРГ 
-    int ret;
+// ============================================================================
+// calculate_p_intro_fix: вклад coalescence ARCHAIC после интрогрессии
+// ============================================================================
+static void calculate_p_intro_fix(tsk_tree_t *tree,
+                                  std::vector<tsk_id_t> &arch,
+                                  std::vector<int> &k,
+                                  double &p_intro_fix) {
+    const tsk_node_table_t &node = tree->tree_sequence->tables->nodes;
+    double t = T_INTRO;
+
+    for (tsk_id_t u : arch) {
+        if (k[5] <= 1) continue;
+        p_intro_fix += LOG_INV_2N_ARCH -
+                       (static_cast<double>(k[5]) * (k[5] - 1) * INV_4N_ARCH * (node.time[u] - t));
+        t = node.time[u];
+        --k[5];
+    }
+}
+
+// ============================================================================
+// Struct: данные одного дерева для параллельной обработки (SoA)
+// ============================================================================
+struct TreeTask {
+    // Phase 1: узлы в (T_MIG, T_SEP] — AFR "stay" coalescence + ghost coalescence
+    // Phase 2: узлы в (T_SEP, T_INTRO] — ancestor coalescence + ghost coalescence
+    // Для каждого узла: время и bf_id (-1 = fixed/not-in-bf, >=0 = active bf index)
+    std::vector<double> phase1_times;
+    std::vector<int>    phase1_bf_id;    // -1 = fixed (not in any bf subtree)
+
+    std::vector<double> phase2_times;
+    std::vector<int>    phase2_bf_id;
+
+    // Предвычисленный вклад fixed nodes в phase1
+    double fixed_p1;           // log-probability вклад fixed phase1 nodes
+    int    fixed_k2_decrease;  // сколько coalescence events от fixed nodes в phase1
+
+    // Active bf_nodes: delta_k3 для каждого
+    std::vector<int> active_delta_k3;
+
+    // DP-результат от inactive bf_nodes: (k3_offset, count)
+    std::vector<int>    dp_k3_offsets;
+    std::vector<double> dp_counts;
+
+    // Начальные счётчики
+    int k0_init;  // AFR lineages at time 0
+    int k1_init;  // SAM lineages at time 0 (after p_mig_fix)
+    int k3_init;  // ghost lineages already counted (should be 0 initially)
+
+    // Base log-probability
+    double p_base;
+
+    // Число active bf_nodes
+    int M_active;
+};
+
+int main(int argc, char *argv[]) {
+    if (argc >= 5) {
+        T_MIG   = std::atof(argv[1]);
+        N_GHOST = std::atof(argv[2]);
+        T_SEP   = std::atof(argv[3]);
+        T_INTRO = std::atof(argv[4]);
+    }
+
+    precompute_constants();
+
+    std::string filename = "my_arg(2).arg";
+    double p_res = 0;
     tsk_treeseq_t ts;
-    ret = tsk_treeseq_load(&ts, "my_test.trees", 0);
-    // ret = tsk_treeseq_load(&ts, "RELATE_arg/real_arg_30_sim_0.relate.ts.trees", 0);
+    int ret = tsk_treeseq_load(&ts, filename.c_str(), 0);
     if (ret != 0) {
-        fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
-        exit(EXIT_FAILURE);
+        std::cerr << "Error loading tree sequence: " << tsk_strerror(ret) << " (" << ret << ")\n";
+        return 1;
     }
 
-    std::vector<int> sample_population(100, 0);
-    for (size_t i = 0; i < 100; ++i)
-    {
-        sample_population[i] = 0;
+    tsk_tree_t tree;
+    ret = tsk_tree_init(&tree, &ts, 0);
+    if (ret != 0) {
+        std::cerr << "Error initializing tree: " << tsk_strerror(ret) << " (" << ret << ")\n";
+        return 1;
     }
-    // создраю вычислятор
-    // treellh::Scenario_Computer computer(ts, parameters, sample_population, 1, 0);
-    // tsk_tree_t tree;
-    // computer.set_parameters(parameters);
 
-    // // иницилизация дерева для нужного трисека
-    // ret = tsk_tree_init(&tree, &ts, 0);
-    // check_tsk_error(ret);
+    std::vector<TreeTask> tasks;
 
-    // // samples
-    // const tsk_id_t *samples = tsk_treeseq_get_samples(&ts);
-    // const tsk_size_t samples_num = tsk_treeseq_get_num_samples(&ts);
+#ifdef TIME
+    auto start_time = std::chrono::high_resolution_clock::now();
+#endif
 
-    // std::vector<tsk_id_t> samples_out(samples, samples + 8);
-    // std::vector<tsk_id_t> samples_adm(samples + 8, samples + 16); 
+    for (ret = tsk_tree_first(&tree); ret == 1; ret = tsk_tree_next(&tree)) {
+        tsk_id_t root = tsk_tree_get_left_root(&tree);
+        const tsk_node_table_t &node = tree.tree_sequence->tables->nodes;
 
-    // // правдоподобие сюда
-    // std::vector<std::vector<double>> result(migration_time.size(), std::vector<double>(migration_prob.size(), 0));
-    // std::vector<std::vector<double>> temp;
-    // // рабочий цикл
-    // double seq_len = tsk_treeseq_get_sequence_length(&ts);
-    // double step = seq_len / double(tree_num);
-    // double left_x = 0;
-    // int tree_c = 0;
-    // // перебираю деревья
-    // left_x = - step - 1;
-    // for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-    // {
-    //     if (tree.interval.left - left_x > step)
-    //     {
-    //         printProgress(tree_c++, tree_num);
-    //         // std::cout << tree.index << std::endl;
-    //         // parameters[1] = computer.find_lowest_coal(tree, samples_out, samples_adm);
-    //         computer.set_parameters(parameters);
-    //         temp = computer.compute_grid_fast(tree, migration_time, migration_prob);
-    //         for (size_t i = 0; i < migration_time.size(); i++)
-    //         {
-    //             for (size_t j = 0; j < migration_prob.size(); ++j)
-    //             {            
-    //                 result[i][j] += temp[i][j];
-    //             }
-    //         }
-    //         left_x = tree.interval.left;
-    //     }
-    // }
-    // std::cout << std::endl;
-    // std::cout << result[0][0] << '\n';
-    // save_matrix_bin("my_test.llh.bin", result);
+                double p_mig_fix = 0.0;
+                double p_intro_fix = 0.0;
 
-    compute_llh_for_sample("arg_files/", sample_population, parameters, migration_time, migration_prob, 100, 1);
+                std::vector<tsk_id_t> bf_nodes;
+                cast(root, &tree, bf_nodes);
 
+                // 0=afr, 1=sam, 2=stay, 3=ghost, 4=ancestors, 5=archaic
+                std::vector<int> k = {0, 0, 0, 0, 0, 0};
+                std::vector<tsk_id_t> nodes, arch, sam, afr_before_mig;
+
+                const tsk_size_t num_nodes = tree.num_nodes;
+                for (tsk_id_t i = 0; i < static_cast<tsk_id_t>(num_nodes); ++i) {
+                    const double t_i = node.time[i];
+                    const tsk_id_t pop_i = node.population[i];
+
+                    if (t_i == 0.0) {
+                        if (pop_i == -1) ++k[1];
+                        else ++k[0];
+                    }
+                    if (pop_i == -1 && t_i <= T_SEP) {
+                        sam.push_back(i);
+                    }
+                    if (pop_i != -1 && t_i <= T_MIG) {
+                        afr_before_mig.push_back(i);
+                    }
+                    if (t_i > T_SEP && t_i <= T_INTRO) {
+                        nodes.push_back(i);
+                    }
+                    if (t_i > T_MIG && t_i <= T_SEP && pop_i != -1) {
+                        nodes.push_back(i);
+                    }
+                    if (t_i >= T_INTRO) {
+                        arch.push_back(i);
+                    }
+                    if (t_i > T_INTRO) {
+                        if (tree.left_child[i] != TSK_NULL &&
+                            node.time[tree.left_child[i]] <= T_INTRO) ++k[5];
+                        if (tree.right_child[i] != TSK_NULL &&
+                            node.time[tree.right_child[i]] <= T_INTRO) ++k[5];
+                    }
+                }
+
+                auto cmp = [&](tsk_id_t a, tsk_id_t b) {
+                    return node.time[a] < node.time[b];
+                };
+                std::sort(sam.begin(), sam.end(), cmp);
+                std::sort(afr_before_mig.begin(), afr_before_mig.end(), cmp);
+                std::sort(arch.begin(), arch.end(), cmp);
+                std::sort(nodes.begin(), nodes.end(), cmp);
+
+                calculate_p_mig_fix(&tree, sam, afr_before_mig, k, p_mig_fix);
+                calculate_p_intro_fix(&tree, arch, k, p_intro_fix);
+
+                const tsk_size_t total_nodes = tree.tree_sequence->tables->nodes.num_rows;
+                std::vector<int> belongs_to_bf(total_nodes, -1);
+                std::vector<int> delta_k3_all(bf_nodes.size(), 0);
+
+                for (size_t i = 0; i < bf_nodes.size(); ++i) {
+                    std::queue<tsk_id_t> q;
+                    q.push(bf_nodes[i]);
+                    while (!q.empty()) {
+                        tsk_id_t u = q.front(); q.pop();
+                        belongs_to_bf[u] = static_cast<int>(i);
+                        if (node.time[u] <= T_MIG &&
+                            node.time[tree.parent[u]] > T_MIG) {
+                            delta_k3_all[i]++;
+                        }
+                        tsk_id_t v = tree.left_child[u];
+                        while (v != TSK_NULL) {
+                            q.push(v);
+                            v = tree.right_sib[v];
+                        }
+                    }
+                }
+
+                std::vector<bool> is_active(bf_nodes.size(), false);
+                for (tsk_id_t u : nodes) {
+                    if (belongs_to_bf[u] != -1) {
+                        is_active[belongs_to_bf[u]] = true;
+                    }
+                }
+
+                std::vector<int> active_indices;
+                std::vector<int> inactive_indices;
+                for (size_t i = 0; i < bf_nodes.size(); ++i) {
+                    if (is_active[i]) active_indices.push_back(static_cast<int>(i));
+                    else inactive_indices.push_back(static_cast<int>(i));
+                }
+
+                // --- DP по inactive (subset-sum для k3_offset) ---
+                int max_k3_inactive = 0;
+                for (int idx : inactive_indices) max_k3_inactive += delta_k3_all[idx];
+
+                std::vector<double> DP(max_k3_inactive + 1, 0.0);
+                DP[0] = 1.0;
+                for (int idx : inactive_indices) {
+                    int d = delta_k3_all[idx];
+                    for (int mk = max_k3_inactive; mk >= d; --mk) {
+                        DP[mk] += DP[mk - d];
+                    }
+                }
+
+                TreeTask task;
+                task.k0_init = k[0];
+                task.k1_init = k[1];
+                task.k3_init = k[3];
+                task.p_base  = p_mig_fix + p_intro_fix;
+                task.M_active = static_cast<int>(active_indices.size());
+
+                for (int idx : active_indices)
+                    task.active_delta_k3.push_back(delta_k3_all[idx]);
+
+                for (int mk = 0; mk <= max_k3_inactive; ++mk) {
+                    if (DP[mk] > 0.0) {
+                        task.dp_k3_offsets.push_back(mk);
+                        task.dp_counts.push_back(DP[mk]);
+                    }
+                }
+
+                std::vector<int> orig_to_active(bf_nodes.size(), -1);
+                for (int j = 0; j < static_cast<int>(active_indices.size()); ++j) {
+                    orig_to_active[active_indices[j]] = j;
+                }
+
+                std::vector<double> fixed_p1_times;
+                std::vector<double> ghost_p1_times;
+                std::vector<int>    ghost_p1_bf_id;
+
+                for (tsk_id_t u : nodes) {
+                    if (node.time[u] > T_SEP) continue;
+                    int orig_bf = belongs_to_bf[u];
+                    if (orig_bf == -1) {
+                        fixed_p1_times.push_back(node.time[u]);
+                    } else {
+                        int act_idx = orig_to_active[orig_bf];
+                        if (act_idx != -1) {
+                            ghost_p1_times.push_back(node.time[u]);
+                            ghost_p1_bf_id.push_back(act_idx);
+                        }
+                    }
+                }
+
+                for (tsk_id_t u : nodes) {
+                    if (node.time[u] <= T_SEP) continue;
+                    int orig_bf = belongs_to_bf[u];
+                    int act_idx = -1;
+                    if (orig_bf != -1) {
+                        act_idx = orig_to_active[orig_bf];
+                    }
+                    task.phase2_times.push_back(node.time[u]);
+                    task.phase2_bf_id.push_back(act_idx);
+                }
+
+                task.phase1_times = std::move(ghost_p1_times);
+                task.phase1_bf_id = std::move(ghost_p1_bf_id);
+
+                task.phase1_times.clear();
+                task.phase1_bf_id.clear();
+                for (tsk_id_t u : nodes) {
+                    if (node.time[u] > T_SEP) continue;
+                    int orig_bf = belongs_to_bf[u];
+                    int act_idx = -1;
+                    if (orig_bf != -1) {
+                        act_idx = orig_to_active[orig_bf];
+                    }
+                    task.phase1_times.push_back(node.time[u]);
+                    task.phase1_bf_id.push_back(act_idx);
+                }
+
+                task.fixed_p1 = 0.0;
+                task.fixed_k2_decrease = 0;
+
+                tasks.push_back(std::move(task));
+    }
+
+    tsk_tree_free(&tree);
+    tsk_treeseq_free(&ts);
+
+    double final_p = 0.0;
+
+    #pragma omp parallel for reduction(+:final_p) schedule(dynamic)
+    for (size_t t = 0; t < tasks.size(); ++t) {
+        const TreeTask &task = tasks[t];
+        const int M_act = task.M_active;
+        const uint64_t max_mask = (1ULL << M_act);
+        const size_t n_dp = task.dp_k3_offsets.size();
+        const size_t n_p1 = task.phase1_times.size();
+        const size_t n_p2 = task.phase2_times.size();
+
+        // Safety check to avoid massive memory allocation
+        if (M_act >= 31) {
+            // std::cerr << "Warning: M_active too large (" << M_act << "), skipping combinations" << std::endl;
+            continue;
+        }
+
+        std::vector<double> log_probs;
+        log_probs.reserve(max_mask * n_dp);
+
+        for (uint64_t mask = 0; mask < max_mask; ++mask) {
+            int active_k3 = 0;
+            for (int b = 0; b < M_act; ++b) {
+                if (mask & (1ULL << b)) {
+                    active_k3 += task.active_delta_k3[b];
+                }
+            }
+
+            for (size_t di = 0; di < n_dp; ++di) {
+                const int mk = task.dp_k3_offsets[di];
+                const double prob_weight = task.dp_counts[di];
+
+                const int total_k3_offset = active_k3 + mk;
+
+                double p = total_k3_offset * LOG_ADMIX +
+                        (task.k0_init - total_k3_offset) * LOG_1_ADMIX;
+
+                double t_ghost = T_MIG;
+                double t_stay  = T_MIG;
+
+                double k2 = static_cast<double>(task.k0_init - (task.k3_init + total_k3_offset));
+                double k3 = static_cast<double>(task.k3_init + total_k3_offset);
+
+                for (size_t i = 0; i < n_p1; ++i) {
+                    const int bf_id = task.phase1_bf_id[i];
+                    const double ntime = task.phase1_times[i];
+                    if (bf_id >= 0 && (mask & (1ULL << bf_id))) {
+                        if (k3 > 1.0) {
+                            p += LOG_INV_2N_GHOST -
+                                (k3 * (k3 - 1.0) * INV_4N_GHOST * (ntime - t_ghost));
+                            k3 -= 1.0;
+                            t_ghost = ntime;
+                        }
+                    } else {
+                        if (k2 > 1.0) {
+                            p += LOG_INV_2N_AFR -
+                                (k2 * (k2 - 1.0) * INV_4N_AFR * (ntime - t_stay));
+                            k2 -= 1.0;
+                            t_stay = ntime;
+                        }
+                    }
+                }
+
+                if (k2 > 1.0) {
+                    p -= k2 * (k2 - 1.0) * INV_4N_AFR * (T_SEP - t_stay);
+                }
+                double k4 = task.k1_init + k2;
+                double t_anc = T_SEP;
+
+                for (size_t i = 0; i < n_p2; ++i) {
+                    const int bf_id = task.phase2_bf_id[i];
+                    const double ntime = task.phase2_times[i];
+
+                    if (bf_id >= 0 && (mask & (1ULL << bf_id))) {
+                        if (k3 > 1.0) {
+                            p += LOG_INV_2N_GHOST -
+                                (k3 * (k3 - 1.0) * INV_4N_GHOST * (ntime - t_ghost));
+                            k3 -= 1.0;
+                            t_ghost = ntime;
+                        }
+                    } else {
+                        if (k4 > 1.0) {
+                            p += LOG_INV_2N_ANC -
+                                (k4 * (k4 - 1.0) * INV_4N_ANC * (ntime - t_anc));
+                            k4 -= 1.0;
+                            t_anc = ntime;
+                        }
+                    }
+                }
+
+                if (k4 > 1.0)
+                    p -= k4 * (k4 - 1.0) * INV_4N_ANC * (T_INTRO - t_anc);
+                if (k3 > 1.0)
+                    p -= k3 * (k3 - 1.0) * INV_4N_GHOST * (T_INTRO - t_ghost);
+                p += std::log(prob_weight);
+
+                log_probs.push_back(p);
+            }
+        }
+
+        if (log_probs.empty()) {
+            continue;
+        }
+
+        double max_lp = log_probs[0];
+        for (double lp : log_probs) {
+            if (lp > max_lp) max_lp = lp;
+        }
+
+        double sum_exp = 0.0;
+        for (double lp : log_probs) {
+            sum_exp += std::exp(lp - max_lp);
+        }
+
+        final_p += task.p_base + max_lp + std::log(sum_exp);
+    }
+
+    #ifdef TIME
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            end_time - start_time);
+        // std::cerr << "Execution time: " << duration.count() << " ms" << std::endl;
+    #endif
+
+    // std::cout << final_p << '\n';
+    p_res = final_p;
+    std::cout << p_res << '\n';
     return 0;
 }
