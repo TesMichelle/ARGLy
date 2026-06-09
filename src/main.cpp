@@ -69,7 +69,7 @@ static bool cast(tsk_id_t start, tsk_tree_t *tree,
                  std::vector<tsk_id_t> &bf_nodes) {
     const tsk_node_table_t &nodes = tree->tree_sequence->tables->nodes;
 
-    if (nodes.population[start] == -1 && nodes.time[start] <= T_SEP) {
+    if (nodes.population[start] == 1 && nodes.time[start] <= T_SEP) {
         return true;
     }
     if (tree->left_child[start] == TSK_NULL) {
@@ -233,19 +233,19 @@ int main(int argc, char *argv[]) {
                     const tsk_id_t pop_i = node.population[i];
 
                     if (t_i == 0.0) {
-                        if (pop_i == -1) ++k[1];
+                        if (pop_i == 1) ++k[1];
                         else ++k[0];
                     }
-                    if (pop_i == -1 && t_i <= T_SEP) {
+                    if (pop_i == 1 && t_i <= T_SEP) {
                         sam.push_back(i);
                     }
-                    if (pop_i != -1 && t_i <= T_MIG) {
+                    if (pop_i != 1 && t_i <= T_MIG) {
                         afr_before_mig.push_back(i);
                     }
                     if (t_i > T_SEP && t_i <= T_INTRO) {
                         nodes.push_back(i);
                     }
-                    if (t_i > T_MIG && t_i <= T_SEP && pop_i != -1) {
+                    if (t_i > T_MIG && t_i <= T_SEP && pop_i != 1) {
                         nodes.push_back(i);
                     }
                     if (t_i >= T_INTRO) {
