@@ -7,6 +7,10 @@ namespace treellh
 {
     namespace
     {
+        // Вспомогательная функция для получения значения Ne (эффективного размера популяции)
+        // из сетки N_grid для заданной популяции и индекса сетки n_i.
+        // Если размер вектора равен 1, то значение Ne фиксировано.
+        // Иначе возвращается значение Ne на шаге n_i сетки.
         double grid_N_value(
             const std::vector<std::vector<double>>& N_grid,
             int population,
@@ -16,33 +20,57 @@ namespace treellh
             const auto &values = N_grid.at(static_cast<size_t>(population));
             return values.size() == 1 ? values[0] : values[n_i];
         }
+
+        // Вспомогательная функция для расчета сочетаний C_n^k
+        uint64_t choose(int n, int k)
+        {
+            if (k < 0 || k > n) return 0;
+            if (k == 0 || k == n) return 1;
+            if (k > n / 2) k = n - k;
+            uint64_t res = 1;
+            for (int i = 1; i <= k; ++i)
+            {
+                res = res * (n - k + i) / i;
+            }
+            return res;
+        }
     }
 
-    // CoalTable implemantation
+    // =========================================================================
+    // Реализация класса CoalTable (Вспомогательный класс для расчета коалесценции)
+    // Представляет собой упорядоченный по времени список событий коалесценции.
+    // =========================================================================
 
+    // Конструктор по умолчанию
     CoalTable::CoalTable()
     {
         time_ = std::vector<double>();
         pit_ = 0;
     }
 
+    // Конструктор от вектора времен коалесценции
     CoalTable::CoalTable(const std::vector<double> &time)
     {
         time_ = time;
         pit_ = time_.size() + 1;
     }
 
+    // Конструктор от размера и начального числа линий
     CoalTable::CoalTable(const int& size, const int& pit)
     {
         time_ = std::vector<double>(size);
         pit_ = pit;
     }
 
+    // Возвращает количество событий коалесценции в таблице
     int CoalTable::size() const
     {
         return this->time_.size();
     }
 
+    // Вычисляет логарифм правдоподобия Kingman coalescent на основе времен в таблице.
+    // Для интервалов между событиями добавляет вероятность отсутствия коалесценции,
+    // а для каждого события коалесценции — плотность вероятности самого события коалесценции.
     double CoalTable::get_likelyhood() const
     {
         double log_llh = 0;
@@ -50,8 +78,11 @@ namespace treellh
         double power = 0;
         int branch_number = pit_;
         double time = 0;
+        
+        // Проходим по всем интервалам времени коалесценции
         for (int i = 0; i < (*this).size(); ++i)
         {
+            // Формула: сумма по интервалам dt * (k*(k-1)/2)
             power += 2 / (branch_number * (branch_number-1)) * (time_[i] - time);
             logC += 2 * std::log(i + 1); 
             time = time_[i];
@@ -62,6 +93,7 @@ namespace treellh
         return log_llh;
     }
 
+    // Оператор слияния двух таблиц времен (сортировка слиянием)
     CoalTable CoalTable::operator+(const CoalTable &B)
     {
         CoalTable result(B.size() + (*this).size(), B.pit_ + (*this).pit_);
@@ -88,6 +120,7 @@ namespace treellh
         return result;
     }
 
+    // Оператор разности двух таблиц времен (удаляет из текущей таблицы времена, которые есть в B)
     CoalTable CoalTable::operator-(const CoalTable &B)
     {
         CoalTable result((*this).size() - B.size(), (*this).pit_ - B.pit_);
@@ -111,17 +144,12 @@ namespace treellh
     }
 
 
+    // =========================================================================
+    // Реализация класса Scenario_Computer (Основной вычислитель правдоподобия)
+    // =========================================================================
 
-
-
-
-
-
-
-
-
-    // Scenario_Computer implementation
-
+    // Конструктор вычислителя. Принимает ARG, вектор начальных параметров,
+    // вектор популяций для каждого образца генома и индексы исследуемых популяций.
     Scenario_Computer::Scenario_Computer(
         const tsk_treeseq_t& ts, std::span<const double> parameters, 
         const std::vector<int>& sample_population,
@@ -131,14 +159,19 @@ namespace treellh
         sample_population_ = sample_population;
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts);
 
+        // Инициализируем массив внутренних узлов (+1 для виртуального корня)
         nodes_ = std::vector<Node>(number_of_nodes + 1);
 
         set_parameters(parameters);
 
-        outgroup_data_index_ = outgroup_data_index;
-        admixed_data_index_ = admixed_data_index;
+        outgroup_data_index_ = outgroup_data_index; // Индекс аутгруппы (SAM) в исходных данных
+        admixed_data_index_ = admixed_data_index;   // Индекс африканской популяции (AFR) в исходных данных
     }
 
+    // Находит узлы дерева, которые находятся непосредственно ниже разделения split_1_time_.
+    // Проводится обход в ширину (BFS) от корня дерева. Узлы выше split_1_time_ сразу окрашиваются
+    // в предковую популяцию base_pop_index_ (популяция ARCH).
+    // Первые встреченные узлы, чье время жизни меньше или равно split_1_time_, сохраняются в lower_nodes_split_1_.
     int Scenario_Computer::compute_lower_nodes_split_1(const tsk_tree_t& tree)
     {
         tsk_id_t root_id = tree.virtual_root;
@@ -150,18 +183,22 @@ namespace treellh
         tsk_id_t child_id;
         while (!stack.empty())
         {
-            node_id = stack.back(); // removes last element
-            nodes_[node_id].population = base_pop_index_; // крашу от корня до разделения
+            node_id = stack.back();
+            nodes_[node_id].population = base_pop_index_; // Красим в предковую популяцию выше split 1
             stack.pop_back();
+            
+            // Проходим по всем потомкам текущего узла
             for (child_id = tree.left_child[node_id]; child_id != TSK_NULL; child_id = tree.right_sib[child_id])
             {
                 double child_time = tree.tree_sequence->tables->nodes.time[child_id];
                 if (child_time > split_1_time_)
                 {
+                    // Если потомок старше split_1_time_, продолжаем обход вглубь
                     stack.push_back(child_id);
                 }
                 else
                 {
+                    // Если потомок моложе split_1_time_, это граница сценариев. Сохраняем его.
                     lower_nodes_split_1_.push_back(child_id);
                 }
             }
@@ -169,41 +206,46 @@ namespace treellh
         return 0;
     }
 
+    // Помечает фиксированные узлы, однозначно принадлежащие аутгруппе (SAM).
+    // Для каждого образца из аутгруппы поднимаемся вверх к предкам. Пока время жизни узлов
+    // меньше split_2_time_, они красятся в популяцию аутгруппы (outgroup_pop_index_).
+    // Все такие узлы помечаются как is_fixed = true, так как они не могут участвовать
+    // в миграции от призрачной популяции.
+    // Также подсчитывается количество независимых линий аутгруппы (SAM) на границе split_2_time_.
     int Scenario_Computer::compute_fixed_nodes(const tsk_tree_t& tree)
     {
         for (auto &node : nodes_)
         {
             node.is_fixed = 0;
         }
-        // get samples from ts object
+        
         const tsk_id_t *samples = tsk_treeseq_get_samples(tree.tree_sequence);
         const tsk_size_t samples_num = tsk_treeseq_get_num_samples(tree.tree_sequence);
         lower_split_2_out_linages_num_ = 0;
-        // loop over all samples
+        
         tsk_id_t node_id;
         for (tsk_size_t i = 0; i < samples_num; i++)
         {
-            // for each sample from outgroup we mark parents until first (ancient) split. 
-            if (sample_population_[samples[i]] == outgroup_data_index_)// Outgroup 
+            // Проверяем, принадлежит ли образец аутгруппе SAM
+            if (sample_population_[samples[i]] == outgroup_data_index_) 
             {
                 node_id = samples[i];   
                 while ( 
                     (node_id != TSK_NULL) &&
                     (nodes_[node_id].is_fixed == 0)
-                    // (tree.tree_sequence->tables->nodes.time[node_id] < split_1_time_) &&
                 )
                 {
-                    // mark population for all outgroup nodes
+                    // Красим узлы ниже разделения split_2 в популяцию аутгруппы
                     if (tree.tree_sequence->tables->nodes.time[node_id] < split_2_time_)
                         nodes_[node_id].population = outgroup_pop_index_;
                     nodes_[node_id].is_fixed = true;
-                    node_id = tree.parent[node_id];
+                    node_id = tree.parent[node_id]; // Поднимаемся к предку
                 }
-                // compute the number of linages at the moment of split 2 in outgrou
+                
+                // Считаем число линий аутгруппы в момент времени split_2
                 if (
                     (node_id == TSK_NULL) ||
                     (tree.tree_sequence->tables->nodes.time[node_id] >= split_2_time_)
-                    
                 ) 
                     lower_split_2_out_linages_num_ += 1;
             }
@@ -211,6 +253,8 @@ namespace treellh
         return 0;
     }
 
+    // Находит узлы, которые можно пропустить при расчете сценариев, так как они полностью
+    // лежат внутри изолированной ветви аутгруппы (SAM) и не пересекаются с африканской ветвью.
     int Scenario_Computer::compute_skipped_nodes(const tsk_tree_t& tree)
     {
         int c = 0;
@@ -221,12 +265,11 @@ namespace treellh
 
         const tsk_id_t *samples = tsk_treeseq_get_samples(tree.tree_sequence);
         const tsk_size_t samples_num = tsk_treeseq_get_num_samples(tree.tree_sequence);
-        // loop over all samples
+        
         tsk_id_t node_id;
         for (tsk_size_t i = 0; i < samples_num; i++)
         {
-            // for each sample from outgroup we mark parents until first (ancient) split. 
-            if (sample_population_[samples[i]] == outgroup_data_index_)// Outgroup 
+            if (sample_population_[samples[i]] == outgroup_data_index_)
             {
                 node_id = samples[i];   
                 while ( 
@@ -238,7 +281,6 @@ namespace treellh
                     )
                 )
                 {
-                    // mark population for all outgroup nodes
                     nodes_[node_id].is_skipped = true;
                     node_id = tree.parent[node_id];
                 }
@@ -248,9 +290,10 @@ namespace treellh
         return c;
     }
 
-    /** 
-    * @brief Сгенерировать патерн 1213121 длины 2^n, оканчивающуюся нулем.
-    */
+    // Генерирует последовательность кода Грея «abacaba» (например, для n=3: 1, 2, 1, 4, 1, 2, 1, 0).
+    // Позволяет перебрать все 2^n сценариев распределения популяций для свободных линий.
+    // На каждом шаге меняется состояние ровно одного бита (одного узла), что позволяет пересчитывать
+    // правдоподобие инкрементально, а не обходить всё дерево с нуля.
     std::vector<uint64_t> Scenario_Computer::generate_abacaba(uint64_t n)
     {
         std::vector<uint64_t> seq(1ULL << n, 0);
@@ -270,6 +313,8 @@ namespace treellh
         return seq;
     }
 
+    // Вычисляет число свободных узлов (линий, чья эволюционная судьба не фиксирована аутгруппой)
+    // на уровне ниже split_1. Это число определяет размерность пространства сценариев: всего 2^n сценариев.
     int Scenario_Computer::compute_log_scenarios_num()
     {
         log_scenarios_num_ = 0;
@@ -283,6 +328,9 @@ namespace treellh
         return log_scenarios_num_;
     }
 
+    // Рекурсивно окрашивает поддерево с корнем в subtree_root_id в заданную популяцию population_id
+    // вглубь по времени до достижения end_time.
+    // Обрабатывает переключение популяций на границах времени миграции (Ghost переходит в Base/AFR ниже migration_time).
     int Scenario_Computer::set_subtree_population(
         const tsk_tree_t &tree, tsk_id_t subtree_root_id, int population_id, double end_time)
     {
@@ -295,8 +343,10 @@ namespace treellh
         double time;
         while (!stack.empty())
         {
-            node_id = stack.back(); // removes last element
+            node_id = stack.back();
             time = tree.tree_sequence->tables->nodes.time[node_id];
+            
+            // Если узел не принадлежит аутгруппе и его время больше end_time, присваиваем ему популяцию
             if ((nodes_[node_id].population != outgroup_pop_index_) && (time >= end_time))
                 nodes_[node_id].population = population_id;
             c++;
@@ -309,6 +359,8 @@ namespace treellh
                 {
                     stack.push_back(child_id);
                 }
+                // Если мы красили в Ghost, но дошли до границы времени интрогрессии (migration_time_):
+                // Линии, идущие дальше в прошлое (моложе migration_time_), должны быть перекрашены в base (AFR)
                 else if (
                     (population_id == ghost_pop_index_) && 
                     (child_time < end_time) && 
@@ -321,6 +373,16 @@ namespace treellh
         return c;
     }
 
+    // Назначает аутгруппе (SAM) соответствующий индекс популяции
+    int Scenario_Computer::set_outgroup(const tsk_tree_t& tree, tsk_id_t* samples, tsk_size_t samples_num)
+    {
+        return 0;
+    }
+
+    // Применяет сценарий с номером scenario_id к дереву.
+    // Свободные линии из lower_nodes_split_1_ красятся в base (0) или в ghost (1)
+    // в зависимости от битов числа scenario_id.
+    // Возвращает количество линий, отнесенных к базовой популяции.
     int Scenario_Computer::set_scenario(const tsk_tree_t& tree, uint64_t scenario_id)
     {
         if (scenario_id >= (1ULL << log_scenarios_num_))
@@ -332,22 +394,25 @@ namespace treellh
         {
             if (nodes_[id].is_fixed == false)
             {
+                // Если нулевой бит равен 0, красим поддерево в base (AFR)
                 if ((scenario_id%2 == 0) && (nodes_[id].population != base_pop_index_))
                 {
                     set_subtree_population(tree, id, base_pop_index_, 0);
                 }
+                // Если нулевой бит равен 1, красим поддерево в ghost (призрачную) популяцию
                 else if ((scenario_id%2 == 1) && (nodes_[id].population != ghost_pop_index_))
                 {
-                    set_subtree_population(tree, id, ghost_pop_index_, migration_time_); // это смущает, как я крашу остаток?
+                    set_subtree_population(tree, id, ghost_pop_index_, migration_time_);
                 }
                 sc_lineages_num_[scenario_id%2] += 1; 
-                scenario_id /= 2;
+                scenario_id /= 2; // Сдвиг к следующему биту
             }
             else
             {
+                // Фиксированные узлы по умолчанию красятся в базовую популяцию
                 if (nodes_[id].population != 0)
                 {
-                    set_subtree_population(tree, id, base_pop_index_, 0); // внутри функции мы не идем красить аутгруппу -- все ок!
+                    set_subtree_population(tree, id, base_pop_index_, 0);
                 }
                 sc_lineages_num_[0] += 1;
             }
@@ -355,6 +420,9 @@ namespace treellh
         return sc_lineages_num_[0];
     }
 
+    // Проверяет корректность разметки сценария.
+    // Каждый узел с ненулевым временем должен иметь назначенную популяцию (population != -1).
+    // Возвращает id некорректного узла или 0, если все в порядке.
     int Scenario_Computer::check_scenario(const tsk_tree_t& tree)
     {
         for (auto node_id : time_ordered_tree_nodes_ids_)
@@ -365,19 +433,21 @@ namespace treellh
         return 0;
     }
 
+    // Проверяет невозможные с биологической точки зрения коалесценции.
+    // Если две популяции физически изолированы друг от друга в определенный интервал времени
+    // (например, AFR и SAM моложе split_2_time_), они не могут коалесцировать (иметь общего предка).
+    // Если такая коалесценция обнаружена, данный сценарий имеет нулевую вероятность.
     int Scenario_Computer::check_imposible_split_2(const tsk_tree_t &tree)
     {
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
         std::vector<bool> flag(number_of_nodes + 1, 0);
-        // get samples from ts object
         const tsk_id_t *samples = tsk_treeseq_get_samples(tree.tree_sequence);
         const tsk_size_t samples_num = tsk_treeseq_get_num_samples(tree.tree_sequence);
-        // loop over all samples
+        
         tsk_id_t node_id;
         for (tsk_size_t i = 0; i < samples_num; i++)
         {
-            // for each sample from outgroup we mark parents until second (early) split. 
-            if (sample_population_[samples[i]] == admixed_data_index_)// Admixed 
+            if (sample_population_[samples[i]] == admixed_data_index_)
             {
                 node_id = samples[i];   
                 while ( 
@@ -386,9 +456,10 @@ namespace treellh
                     (flag[node_id] == 0)
                 )
                 {
+                    // Если линия AFR пересеклась с аутгруппой SAM ниже split_2
                     if (nodes_[node_id].population == outgroup_pop_index_)
                     {
-                        return node_id;
+                        return node_id; // Возвращаем проблемный узел
                     }
                     flag[node_id] = 1;
                     node_id = tree.parent[node_id];
@@ -398,17 +469,16 @@ namespace treellh
         return 0;   
     }
 
-
+    // Вспомогательная функция поиска самого раннего времени коалесценции
+    // между линиями множества A и множества B ниже split_2_time_.
     double Scenario_Computer::find_lowest_coal(const tsk_tree_t& tree, std::span<const tsk_id_t> A, std::span<const tsk_id_t> B)
     {
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
         std::vector<bool> flag_A(number_of_nodes + 1, 0);
         std::vector<bool> flag_B(number_of_nodes + 1, 0);
-        // get samples from ts object
 
         for (tsk_id_t node_id : A)
         {
-            // for each sample from outgroup we mark parents until second (early) split. 
             while ( 
                 (node_id != TSK_NULL) &&
                 (tree.tree_sequence->tables->nodes.time[node_id] < split_2_time_) &&
@@ -441,7 +511,10 @@ namespace treellh
         return time;
     }
 
-
+    // Сортирует узлы дерева по времени их возникновения в порядке убывания (от корня к листьям).
+    // Результат сохраняется в time_ordered_tree_nodes_ids_. Это необходимо, чтобы при расчете
+    // правдоподобия мы могли двигаться по дереву строго назад во времени (снизу вверх)
+    // и последовательно обрабатывать события коалесценции.
     int Scenario_Computer::sort_by_time(const tsk_tree_t& tree)
     {
         tsk_id_t virtual_root_id = tree.virtual_root;
@@ -454,7 +527,7 @@ namespace treellh
         std::vector<tsk_id_t>::iterator it;
         while (!part_ordered.empty())
         {
-            node_id = part_ordered.back(); // removes last element
+            node_id = part_ordered.back();
             part_ordered.pop_back();
             if (node_id != virtual_root_id)
             {
@@ -478,25 +551,19 @@ namespace treellh
         return 0;     
     }
 
-    /** 
-    * @brief Вычисляет правдоподобие дерева на заданном участке.
-    * 
-    * @param tree объект дерева в формате `tsk_tree_t`.
-    * @param time_start верхняя граница временного интервала.
-    * @param time_end нижняя граница временного интервала.
-    * @param populations вектор из популяций, для которых нужно вычислять правдоподобие.
-    * @param init_lineages_num количество ветвей в дереве в каждой популяции в момент времени `time_start`
-    * 
-    * @return вычисленное правдоподобие. 
-    */
+    // Вычисляет логарифм правдоподобия коалесценции на временном интервале [time_end, time_start]
+    // для заданного набора популяций и начального числа линий.
+    // Реализует модель Кингмана:
+    // - Коалесценция k линий дает вклад log(1 / 2Ne)
+    // - Не-коалесценция k линий на интервале dt дает вклад -k*(k-1)/2 * dt / 2Ne
     double Scenario_Computer::smart_llh(
         double time_start, double time_end, 
         std::span<const int> populations, std::span<int> lineages_num)
     {
         double llh = 0;
-
         int pop_num = populations.size();
         
+        // Лямбда-функция для поиска индекса популяции в локальном массиве
         auto population_index = [populations](int population) {
             for (size_t i = 0; i < populations.size(); ++i)
             {
@@ -511,6 +578,8 @@ namespace treellh
         
         int i = 0;
         next_node = nodes_[time_ordered_tree_nodes_ids_[i]];
+        
+        // Пропускаем узлы старше верхней границы интервала time_start
         while (((next_node.time > time_start) || (population_index(next_node.population) == -1)) && next_node.time != 0)
         {
             i++;
@@ -518,6 +587,8 @@ namespace treellh
         }
 
         int pop_i = population_index(next_node.population);
+        
+        // Основной цикл: идем вниз по времени (в прошлое) до нижней границы time_end
         while (next_node.time > time_end)
         {
             pop_i = population_index(next_node.population);
@@ -525,7 +596,8 @@ namespace treellh
             {
                 if (current_node[pop_i].time == -1)
                 {
-                    // llh without coal
+                    // Если это первое событие в этой популяции на интервале,
+                    // считаем вероятность не-коалесценции от начала интервала time_start до этого события
                     llh += (
                         -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2.
                         * (time_start - next_node.time)
@@ -533,10 +605,13 @@ namespace treellh
                 }
                 else
                 {
-                    // llh with coal 
+                    // Если в популяции уже были события коалесценции:
                     if (lineages_num[pop_i] > 1)
                     {
+                        // Добавляем вероятность самого события слияния: log(1 / 2Ne)
                         llh += std::log(1 / N_[pop_i] / 2.);
+                        
+                        // Добавляем вероятность не-коалесценции на интервале между соседними событиями
                         llh += (
                             -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2.
                             * (current_node[pop_i].time - next_node.time)
@@ -544,12 +619,13 @@ namespace treellh
                     } 
                 }
                 current_node[pop_i] = next_node;
-                lineages_num[pop_i] += 1;
+                lineages_num[pop_i] += 1; // Увеличиваем число линий (так как идем назад во времени, число линий увеличивается при ветвлении)
             }
             i++;
             next_node = nodes_[time_ordered_tree_nodes_ids_[i]];
         }
-        // llh end
+
+        // Хвостовой расчет: добавляем вероятность не-коалесценции от последнего события до конца интервала time_end
         for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
         {
             if (lineages_num[pop_i] > 1)
@@ -563,7 +639,7 @@ namespace treellh
                 }
                 else
                 {
-                    llh += std::log(1 / N_[pop_i] / 2.); // exact pair, earlier: (lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2.)
+                    llh += std::log(1 / N_[pop_i] / 2.);
                     llh += (
                         -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2.
                         * (current_node[pop_i].time - time_end)
@@ -574,17 +650,9 @@ namespace treellh
         return llh;
     }
 
-    /** 
-    * @brief Вычисляет правдоподобие дерева на заданном участке.
-    * 
-    * @param tree объект дерева в формате `tsk_tree_t`.
-    * @param time_start верхняя граница временного интервала.
-    * @param time_end нижняя граница временного интервала.
-    * @param populations вектор из популяций, для которых нужно вычислять правдоподобие.
-    * @param init_lineages_num количество ветвей в дереве в каждой популяции в момент времени `time_start`
-    * 
-    * @return вычисленное правдоподобие. 
-    */
+    // Векторизованная версия smart_llh. Вычисляет правдоподобие коалесценции одновременно
+    // для всей сетки эффективных размеров популяций Ne (размера N_grid_size).
+    // Позволяет избежать многократного прохода по структуре дерева для разных Ne.
     double Scenario_Computer::smart_llh_to_nodes(
         double time_start, double time_end, 
         std::span<const int> populations, 
@@ -612,7 +680,6 @@ namespace treellh
 
         double current_time = time_start;
     
-        
         size_t i = 0;
         next_node_id = time_ordered_tree_nodes_ids_[i];
 
@@ -659,12 +726,9 @@ namespace treellh
             i++;
             next_node_id = time_ordered_tree_nodes_ids_[i];
         }
-        // llh end
-        // std::cout << "ln: " << lineages_num[pop_i] << std::endl;
 
         while ((i < time_ordered_tree_nodes_ids_.size()) && (population_index(nodes_[next_node_id].population) == -1))
         {
-            // std::cout << next_pop << std::endl;
             i++;
             next_node_id = time_ordered_tree_nodes_ids_[i];
         }
@@ -672,7 +736,7 @@ namespace treellh
         std::fill(llh_step.begin(), llh_step.end(), 0);
         for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
         {
-            if (cur_node_id != -1) // it means we have coalescence in some population
+            if (cur_node_id != -1)
             {
                 llh_step[n_i] = log_inv_2N_grid(populations[cur_pop_i], n_i)
                     + nodes_llh(cur_node_id, n_i);
@@ -681,7 +745,7 @@ namespace treellh
             {
                 llh_step[n_i] += (
                     -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. * inv_2N_grid(populations[pop_i], n_i)
-                    * (current_time - time_end) // current_time = start_time if no coalescence obtained.
+                    * (current_time - time_end)
                 );  
             }
             nodes_llh(next_node_id, n_i) += llh_step[n_i];
@@ -689,13 +753,12 @@ namespace treellh
 
         for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
         {
-            // std::cout << pop_i << " " << lineages_num[pop_i] << ", ";
             nodes_lineage_num(next_node_id, pop_i) = lineages_num[pop_i];
         }
-        // std::cout << std::endl;
         return nodes_llh(next_node_id, 0);
     }
 
+    // Проверка корректности сортировки узлов по времени
     int Scenario_Computer::debug_sort_by_time(const tsk_tree_t &tree)
     {
         double t2, t1;
@@ -710,14 +773,17 @@ namespace treellh
         return 0;
     }
 
-
-DenseTensor3D Scenario_Computer::compute_grid_fast(
+    // =========================================================================
+    // Основная оптимизированная функция расчета правдоподобия на сетке параметров
+    // =========================================================================
+    DenseTensor3D Scenario_Computer::compute_grid_fast(
         const tsk_tree_t& tree, 
         std::vector<double> migration_time,
         std::vector<double> migration_prob,
         std::vector<std::vector<double>> N
     ) 
     {
+        // Инициализируем сетку Ne если она пуста
         if (N.empty())
         {
             N = {{N_[0]}, {N_[1]}, {N_[2]}};
@@ -748,6 +814,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             }
         }
 
+        // Предварительно вычисляем обратные величины 1/(2Ne) для быстрого умножения вместо деления
         DenseMatrix inv_2N_matrix(N.size(), N_grid_size, 0);
         DenseMatrix log_inv_2N_matrix(N.size(), N_grid_size, 0);
         auto inv_2N = inv_2N_matrix.view();
@@ -762,6 +829,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             }
         }
 
+        // Предварительно логарифмируем вероятности миграции для ускорения расчетов
         std::vector<double> log_migration_prob(migration_prob.size(), 0);
         std::vector<double> log_no_migration_prob(migration_prob.size(), 0);
         std::vector<int> migration_prob_kind(migration_prob.size(), 0);
@@ -790,8 +858,8 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         DenseTensor3D result_tensor(migration_time.size(), N_grid_size, migration_prob.size(), 0);
         DoubleTensor3DView result = result_tensor.view();
 
+        // Если у дерева не один корень (мульти-дерево), пропускаем его
         tsk_size_t roots_num = tsk_tree_get_num_roots(&tree);
-
         if (roots_num != 1)
         {
             std::cout << "Roots number is not equal to 1. Skipping the tree." << std::endl;
@@ -807,12 +875,12 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             node.population = -1;
         }
         
+        // Подготовка дерева: сортировка узлов, поиск нижних узлов, определение фиксированных
         sort_by_time(tree);
-        compute_lower_nodes_split_1(tree);
         compute_fixed_nodes(tree);
+        compute_lower_nodes_split_1(tree);
 
-        // print_lower_nodes_split_1();
-
+        // Отбраковываем дерево, если в нем есть недопустимая коалесценция ниже split 2
         int impossible_coal_node = check_imposible_split_2(tree);
         if (impossible_coal_node != 0)
         {
@@ -821,11 +889,30 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             return result_tensor;
         }
 
-        int log_scenario_num = compute_log_scenarios_num();
+        // Идентификация неактивных и активных узлов
+        inactive_nodes_.clear();
+        std::vector<tsk_id_t> active_nodes;
+        for (tsk_id_t id : lower_nodes_split_1_)
+        {
+            if (nodes_[id].is_fixed == false)
+            {
+                if (tree.tree_sequence->tables->nodes.time[id] <= migration_time_lb)
+                {
+                    inactive_nodes_.push_back(id);
+                }
+                else
+                {
+                    active_nodes.push_back(id);
+                }
+            }
+        }
+
+        int log_scenario_num = active_nodes.size();
 
         std::vector<int> lineages_num;
         std::vector<int> populations;
 
+        // Вычисляем правдоподобие предковой популяции ARCH (выше split 1)
         double root_time = tree.tree_sequence->tables->nodes.time[time_ordered_tree_nodes_ids_[0]];
         populations = {base_pop_index_}; 
         int linages_num_root[] = {1};
@@ -848,22 +935,29 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         }
 
         tsk_size_t number_of_nodes = tsk_treeseq_get_num_nodes(&ts_);
+        
+        // Матрицы для хранения промежуточных результатов безструктурного (базового) правдоподобия
         std::vector<double> no_structure_llh_data(number_of_nodes * N_grid_size, 0);
         std::vector<int> no_structure_lineage_num_data(number_of_nodes, 0);
         DoubleMatrixView no_structure_llh(no_structure_llh_data.data(), number_of_nodes, N_grid_size);
         IntMatrixView no_structure_lineage_num(no_structure_lineage_num_data.data(), number_of_nodes, 1);
         std::vector<double> llh_step_buffer(N_grid_size, 0);
 
+        // Рассчитываем правдоподобие для базового "бесструктурного" сценария (scenario = 0)
         uint64_t scenario = 0;
         set_scenario(tree, scenario);
         populations = {base_pop_index_}; 
+        
+        // От split 1 до split 2
+        int lineages_num_copy[] = {sc_lineages_num_[0], sc_lineages_num_[1]};
         smart_llh_to_nodes(
-            split_1_time_, split_2_time_, populations, sc_lineages_num_, 
+            split_1_time_, split_2_time_, populations, lineages_num_copy, 
             no_structure_llh, no_structure_lineage_num, inv_2N, log_inv_2N,
             llh_step_buffer, N_grid_size
         );
+        // От split 2 до 0
         lineages_num = { 
-                sc_lineages_num_[0] - lower_split_2_out_linages_num_
+                lineages_num_copy[0] - lower_split_2_out_linages_num_
             };
         smart_llh_to_nodes(
             split_2_time_, 0, populations, lineages_num, 
@@ -871,6 +965,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             llh_step_buffer, N_grid_size
         );
 
+        // Нормировка правдоподобий во избежание численного переполнения
         for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
         {
             size_t min_llh_i = 0;
@@ -896,7 +991,6 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             }
         }
 
-
         if (log_scenario_num >= 20)
         {
             std::cout << "Attention! Memory need: " << (1 << (log_scenario_num - 10 - 10)) * sizeof(double) * 4 * number_of_nodes / 1024. << " gB." << std::endl;
@@ -905,12 +999,13 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
 #ifndef NDEBUG
         tsk_id_t err_id;
 #endif
+        // Матрицы для структурированного сценария (с разделением на Ghost и Base)
         std::vector<double> structure_llh_data(number_of_nodes * N_grid_size, 0);
         std::vector<int> structure_lineage_num_data(number_of_nodes * 2, 0);
         DoubleMatrixView structure_llh(structure_llh_data.data(), number_of_nodes, N_grid_size);
         IntMatrixView structure_lineage_num(structure_lineage_num_data.data(), number_of_nodes, 2);
         
-
+        // Генерируем Gray-код abacaba для эффективного перебора всех 2^n сценариев
         std::vector<uint64_t> abacaba = generate_abacaba(log_scenario_num);
         scenario = 0;
         int lineages_num_total;
@@ -923,145 +1018,214 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         double llh_for_sc = 0;
         double mig_prob = 0;
         double t = 0;
+
+        auto flip_active_node = [&](tsk_id_t n_id) {
+            if (nodes_[n_id].population == base_pop_index_)
+            {
+                set_subtree_population(tree, n_id, ghost_pop_index_, migration_time_lb);
+                sc_lineages_num_[0]--;
+                sc_lineages_num_[1]++;
+            }
+            else
+            {
+                set_subtree_population(tree, n_id, base_pop_index_, 0);
+                sc_lineages_num_[0]++;
+                sc_lineages_num_[1]--;
+            }
+        };
+
+        size_t n = inactive_nodes_.size();
+        std::vector<bool> inactive_is_ghost(n, false);
+        auto flip_inactive_node = [&](size_t idx) {
+            if (!inactive_is_ghost[idx])
+            {
+                inactive_is_ghost[idx] = true;
+                sc_lineages_num_[0]--;
+                sc_lineages_num_[1]++;
+            }
+            else
+            {
+                inactive_is_ghost[idx] = false;
+                sc_lineages_num_[0]++;
+                sc_lineages_num_[1]--;
+            }
+        };
+
+        // Инициализация состояний для змейки
+        sc_lineages_num_[0] = lower_nodes_split_1_.size();
+        sc_lineages_num_[1] = 0;
+        for (tsk_id_t id : lower_nodes_split_1_)
+        {
+            set_subtree_population(tree, id, base_pop_index_, 0);
+        }
+
+        // Основной цикл по сценариям
         for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
         {
-            std::fill(structure_llh_data.begin(), structure_llh_data.end(), 0);
-            std::fill(structure_lineage_num_data.begin(), structure_lineage_num_data.end(), 0);
-            // std::cout << std::bitset<6>(scenario) << std::endl;
-            set_scenario(tree, scenario);
-#ifndef NDEBUG
-            err_id = check_scenario(tree);
-            if (err_id != 0)
+            bool moving_up = (sc_i % 2 == 0);
+            for (size_t step = 0; step <= n; ++step)
             {
-                std::cout << "Error scenario: " << err_id << std::endl;
-                std::cout << nodes_[err_id].is_fixed << std::endl;
-                std::cout << nodes_[err_id].population << std::endl;
-                std::cout << ts_.tables->nodes.population[err_id] << std::endl;
-                std::cout << tree.tree_sequence->tables->nodes.time[err_id] << std::endl; 
-                std::cout << nodes_[tree.parent[err_id]].population << std::endl;
-                std::cout << ts_.tables->nodes.time[tree.parent[err_id]] << std::endl;
-                break;
-            }
+                size_t k = moving_up ? step : (n - step);
+                double comb_prob = choose(n, k);
+
+                std::fill(structure_llh_data.begin(), structure_llh_data.end(), 0);
+                std::fill(structure_lineage_num_data.begin(), structure_lineage_num_data.end(), 0);
+#ifndef NDEBUG
+                err_id = check_scenario(tree);
+                if (err_id != 0)
+                {
+                    std::cout << "Error scenario: " << err_id << std::endl;
+                    break;
+                }
 #endif
 
-            populations = {base_pop_index_, ghost_pop_index_}; 
-            smart_llh_to_nodes(
-                    split_1_time_, split_2_time_, populations, sc_lineages_num_, 
-                    structure_llh, structure_lineage_num, inv_2N, log_inv_2N,
-                    llh_step_buffer, N_grid_size
-            );
+                // Считаем коалесценцию на первом интервале (от split 1 до split 2)
+                populations = {base_pop_index_, ghost_pop_index_}; 
+                int lineages_num_copy[] = {sc_lineages_num_[0], sc_lineages_num_[1]};
+                smart_llh_to_nodes(
+                        split_1_time_, split_2_time_, populations, lineages_num_copy, 
+                        structure_llh, structure_lineage_num, inv_2N, log_inv_2N,
+                        llh_step_buffer, N_grid_size
+                );
 
-            populations = {base_pop_index_, ghost_pop_index_}; 
-            lineages_num = { 
-                sc_lineages_num_[0] - lower_split_2_out_linages_num_,
-                sc_lineages_num_[1]
-            };
-            // ||
-            smart_llh_to_nodes(
-                    split_2_time_, migration_time_lb, populations, lineages_num, 
-                    structure_llh, structure_lineage_num, inv_2N, log_inv_2N,
-                    llh_step_buffer, N_grid_size
-            );
+                // Считаем коалесценцию на втором интервале (от split 2 до нижней границы сетки времени миграции)
+                populations = {base_pop_index_, ghost_pop_index_}; 
+                lineages_num = { 
+                    lineages_num_copy[0] - lower_split_2_out_linages_num_,
+                    lineages_num_copy[1]
+                };
+                smart_llh_to_nodes(
+                        split_2_time_, migration_time_lb, populations, lineages_num, 
+                        structure_llh, structure_lineage_num, inv_2N, log_inv_2N,
+                        llh_step_buffer, N_grid_size
+                );
 
-            // std::cout << lineages_num[0] << " / " << lineages_num[1] << std::endl;
-            // std::cout << sc_i << " of " << pow(2, log_scenario_num) << " : " << log_prob << std::endl;
-            node_i = 0;
-            node_id = time_ordered_tree_nodes_ids_[node_i];
-            prev_node_id = - 1;
-            for (size_t i = 0; i < migration_time.size(); ++i)
-            {
-                t = migration_time[i];
-                while ((nodes_[node_id].time > t) || (nodes_[node_id].population == outgroup_pop_index_))
+                node_i = 0;
+                node_id = time_ordered_tree_nodes_ids_[node_i];
+                prev_node_id = - 1;
+                
+                // Итерируемся по сетке времен миграции
+                for (size_t i = 0; i < migration_time.size(); ++i)
                 {
-                    node_i++;
-                    if (nodes_[node_id].population != outgroup_pop_index_)
+                    t = migration_time[i];
+                    // Ищем узел дерева, непосредственно предшествующий времени миграции t
+                    while ((nodes_[node_id].time > t) || (nodes_[node_id].population == outgroup_pop_index_))
                     {
-                        prev_node_id = node_id;
-                    }
-                    node_id = time_ordered_tree_nodes_ids_[node_i];
-                }
-
-                if (prev_node_id == -1)
-                {
-                    if (sc_i == abacaba.size() - 1)
-                    {
-                        for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
+                        node_i++;
+                        if (nodes_[node_id].population != outgroup_pop_index_)
                         {
+                            prev_node_id = node_id;
+                        }
+                        node_id = time_ordered_tree_nodes_ids_[node_i];
+                    }
+
+                    if (prev_node_id == -1)
+                    {
+                        if (sc_i == abacaba.size() - 1 && step == n)
+                        {
+                            for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
+                            {
+                                for (size_t j = 0; j < migration_prob.size(); ++j)
+                                {
+                                    result(i, n_i, j) = llh_root[n_i] + no_structure_llh(node_id, n_i);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    lineages_num_total = 0;
+                    lineages_between[0] = structure_lineage_num(node_id, 0); 
+                    lineages_between[1] = structure_lineage_num(node_id, 1); 
+                    if (split_2_time_ <= nodes_[prev_node_id].time)
+                        lineages_between[0] += lower_split_2_out_linages_num_;
+                    for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                    {
+                        lineages_num_total += structure_lineage_num(node_id, pop_i);
+                    }
+
+                    for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
+                    {
+                        llh_step = log_inv_2N(nodes_[prev_node_id].population, n_i);
+                        for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                        {
+                            llh_step += (
+                                -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. * inv_2N(populations[pop_i], n_i) 
+                                * (nodes_[prev_node_id].time - split_2_time_)
+                            );
+                            llh_step += (
+                                -structure_lineage_num(node_id, pop_i) * (structure_lineage_num(node_id, pop_i) - 1) / 2. * inv_2N(populations[pop_i], n_i) 
+                                * (split_2_time_ - t)
+                            );
+                        }
+
+                        llh_for_sc = structure_llh(prev_node_id, n_i) + llh_step;
+                        const int base_lineages = structure_lineage_num(node_id, 0);
+                        const int ghost_lineages = structure_lineage_num(node_id, 1);
+                        
+                        // Умножаем на вероятности миграции для текущего сценария (доля Ghost линий)
+                        for (size_t j = 0; j < migration_prob.size(); ++j)
+                        {
+                            if (migration_prob_kind[j] == 1)
+                            {
+                                mig_prob = ghost_lineages == 0 ? 0 : -std::numeric_limits<double>::infinity();
+                            }
+                            else if (migration_prob_kind[j] == 2)
+                            {
+                                mig_prob = base_lineages == 0 ? 0 : -std::numeric_limits<double>::infinity();
+                            }
+                            else
+                            {
+                                mig_prob = base_lineages * log_no_migration_prob[j]
+                                    + ghost_lineages * log_migration_prob[j];
+                            }
+                            result(i, n_i, j) += comb_prob * std::exp(llh_for_sc + mig_prob);
+                        }
+                        
+                        // По окончании перебора всех сценариев переводим в логарифмический масштаб и добавляем хвост
+                        if (sc_i == abacaba.size() - 1 && step == n)
+                        {
+                            llh_step_r = (
+                                -lineages_num_total * (lineages_num_total - 1) / 2. * inv_2N(base_pop_index_, n_i)
+                                * (t - nodes_[node_id].time)
+                            );
                             for (size_t j = 0; j < migration_prob.size(); ++j)
                             {
-                                result(i, n_i, j) = llh_root[n_i] + no_structure_llh(node_id, n_i);
+                                result(i, n_i, j) = llh_root[n_i] + std::log(result(i, n_i, j))
+                                    + no_structure_llh(node_id, n_i)
+                                    + llh_step_r;
                             }
                         }
                     }
-                    continue;
                 }
-
-                lineages_num_total = 0;
-                lineages_between[0] = structure_lineage_num(node_id, 0); 
-                lineages_between[1] = structure_lineage_num(node_id, 1); 
-                if (split_2_time_ <= nodes_[prev_node_id].time) // prev_time <= split_2 <= migration <= node_time
-                    lineages_between[0] += lower_split_2_out_linages_num_;
-                for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                
+                // Переключение неактивной линии
+                if (step < n)
                 {
-                    lineages_num_total += structure_lineage_num(node_id, pop_i);
-                }
-
-                for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
-                {
-                    llh_step = log_inv_2N(nodes_[prev_node_id].population, n_i);
-                    for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
-                    {
-                        llh_step += (
-                            -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. * inv_2N(populations[pop_i], n_i) 
-                            * (nodes_[prev_node_id].time - split_2_time_) // between prev_time and split.
-                        );
-                        llh_step += (
-                            -structure_lineage_num(node_id, pop_i) * (structure_lineage_num(node_id, pop_i) - 1) / 2. * inv_2N(populations[pop_i], n_i) 
-                            * (split_2_time_ - t) // between split and migration removing splited lineages.
-                        );
-                    }
-
-                    llh_for_sc = structure_llh(prev_node_id, n_i) + llh_step;
-                    const int base_lineages = structure_lineage_num(node_id, 0);
-                    const int ghost_lineages = structure_lineage_num(node_id, 1);
-                    for (size_t j = 0; j < migration_prob.size(); ++j)
-                    {
-                        if (migration_prob_kind[j] == 1)
-                        {
-                            mig_prob = ghost_lineages == 0 ? 0 : -std::numeric_limits<double>::infinity();
-                        }
-                        else if (migration_prob_kind[j] == 2)
-                        {
-                            mig_prob = base_lineages == 0 ? 0 : -std::numeric_limits<double>::infinity();
-                        }
-                        else
-                        {
-                            mig_prob = base_lineages * log_no_migration_prob[j]
-                                + ghost_lineages * log_migration_prob[j];
-                        }
-                        result(i, n_i, j) += std::exp(llh_for_sc + mig_prob);
-                    }
-                    if (sc_i == abacaba.size() - 1)
-                    {
-                        llh_step_r = (
-                            -lineages_num_total * (lineages_num_total - 1) / 2. * inv_2N(base_pop_index_, n_i)
-                            * (t - nodes_[node_id].time) // current_time = start_time if no coalescence obtained.
-                        );
-                        for (size_t j = 0; j < migration_prob.size(); ++j)
-                        {
-                            result(i, n_i, j) = llh_root[n_i] + std::log(result(i, n_i, j))
-                                + no_structure_llh(node_id, n_i)
-                                + llh_step_r;
-                        }
-                    }
+                    size_t flip_idx = moving_up ? step : (n - 1 - step);
+                    flip_inactive_node(flip_idx);
                 }
             }
-            scenario = scenario ^ abacaba[sc_i];
+
+            // Переход к следующему активному сценарию по коду Грея
+            uint64_t diff = abacaba[sc_i];
+            if (diff != 0)
+            {
+                int bit_idx = 0;
+                uint64_t temp = diff;
+                while ((temp & 1) == 0) {
+                    temp >>= 1;
+                    bit_idx++;
+                }
+                flip_active_node(active_nodes[bit_idx]);
+            }
         }
         return result_tensor;
     }
 
-
+    // Вычисляет суммарное логарифмическое правдоподобие для одного дерева
+    // при фиксированных параметрах (без использования сеток).
+    // Полезно для быстрой проверки правдоподобия конкретной точки в пространстве параметров.
     double Scenario_Computer::compute_llh(const tsk_tree_t& tree)
     {
         double llh = 0;
@@ -1073,17 +1237,27 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
 
         sort_by_time(tree);
         compute_lower_nodes_split_1(tree);
-
-
         compute_fixed_nodes(tree);
 
-        // std::cout << lower_nodes_split_1_.size() << std::endl;
-        // for (auto node : lower_nodes_split_1_)
-        // {
-        //     std:: cout << node << ": " << nodes_[node].is_fixed << std::endl;
-        // }
+        // Идентификация неактивных и активных узлов
+        inactive_nodes_.clear();
+        std::vector<tsk_id_t> active_nodes;
+        for (tsk_id_t id : lower_nodes_split_1_)
+        {
+            if (nodes_[id].is_fixed == false)
+            {
+                if (tree.tree_sequence->tables->nodes.time[id] <= migration_time_)
+                {
+                    inactive_nodes_.push_back(id);
+                }
+                else
+                {
+                    active_nodes.push_back(id);
+                }
+            }
+        }
 
-        int log_scenario_num = compute_log_scenarios_num();
+        int log_scenario_num = active_nodes.size();
 
         std::vector<int> lineages_num;
         std::vector<int> populations;
@@ -1093,6 +1267,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         int linages_num_root[] = {1};
         int lineage_num_lower_migration = 0;
 
+        // Расчет над split 1 (ARCH предки)
         if (root_time > split_1_time_)
         {
             llh += smart_llh(
@@ -1100,105 +1275,137 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             );
         }
         
-        // std::cout << llh << std::endl;
-
         double llh_temp = 0;
         double log_prob = 0;
         double prob_sum = 0;
 
         tsk_id_t err_id;
-        // tsk_id_t impossible_coal_node;
         std::vector<uint64_t> abacaba = generate_abacaba(log_scenario_num);
 
-        uint64_t scenario = 0;
+        auto flip_active_node = [&](tsk_id_t n_id) {
+            if (nodes_[n_id].population == base_pop_index_)
+            {
+                set_subtree_population(tree, n_id, ghost_pop_index_, migration_time_);
+                sc_lineages_num_[0]--;
+                sc_lineages_num_[1]++;
+            }
+            else
+            {
+                set_subtree_population(tree, n_id, base_pop_index_, 0);
+                sc_lineages_num_[0]++;
+                sc_lineages_num_[1]--;
+            }
+        };
+
+        size_t n = inactive_nodes_.size();
+        std::vector<bool> inactive_is_ghost(n, false);
+        auto flip_inactive_node = [&](size_t idx) {
+            if (!inactive_is_ghost[idx])
+            {
+                inactive_is_ghost[idx] = true;
+                sc_lineages_num_[0]--;
+                sc_lineages_num_[1]++;
+            }
+            else
+            {
+                inactive_is_ghost[idx] = false;
+                sc_lineages_num_[0]++;
+                sc_lineages_num_[1]--;
+            }
+        };
+
+        // Инициализация состояний для змейки
+        sc_lineages_num_[0] = lower_nodes_split_1_.size();
+        sc_lineages_num_[1] = 0;
+        for (tsk_id_t id : lower_nodes_split_1_)
+        {
+            set_subtree_population(tree, id, base_pop_index_, 0);
+        }
+
+        // Суммируем по всем сценариям (с змейкой для неактивных)
         for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
         {
-            // std::cout << std::bitset<6>(scenario) << std::endl;
-            log_prob = 0;
-            set_scenario(tree, scenario);
-            // impossible_coal_node = check_imposible_split_2(tree);
-            // if (impossible_coal_node != 0)
-            // {
-            //     std::cout << "impossible scenario (coalescence between two isolated populations)." << std::endl;
-            //     std::cout << "Coalescence node (" << impossible_coal_node << ")." << std::endl;
-            //     return std::log(0);
-            // }
-            err_id = check_scenario(tree);
-            if (err_id != 0)
+            bool moving_up = (sc_i % 2 == 0);
+            for (size_t step = 0; step <= n; ++step)
             {
-                std::cout << "Error scenario: " << err_id << std::endl;
-                std::cout << nodes_[err_id].is_fixed << std::endl;
-                std::cout << nodes_[err_id].population << std::endl;
-                std::cout << ts_.tables->nodes.population[err_id] << std::endl;
-                std::cout << tree.tree_sequence->tables->nodes.time[err_id] << std::endl; 
-                std::cout << nodes_[tree.parent[err_id]].population << std::endl;
-                std::cout << ts_.tables->nodes.time[tree.parent[err_id]] << std::endl;
-                break;
+                size_t k = moving_up ? step : (n - step);
+                double comb_prob = choose(n, k);
+
+                log_prob = 0;
+#ifndef NDEBUG
+                err_id = check_scenario(tree);
+                if (err_id != 0)
+                {
+                    std::cout << "Error scenario: " << err_id << std::endl;
+                    break;
+                }
+#endif
+
+                // Коалесценция на интервале split 1 -> split 2 (популяции AFR/Ghost)
+                populations = {base_pop_index_, ghost_pop_index_}; 
+                int lineages_num_copy[] = {sc_lineages_num_[0], sc_lineages_num_[1]};
+                llh_temp = smart_llh(
+                        split_1_time_, split_2_time_, populations, lineages_num_copy
+                );
+                log_prob += llh_temp;
+
+                // Коалесценция на интервале split 2 -> migration_time
+                populations = {base_pop_index_, ghost_pop_index_}; 
+                lineages_num = { 
+                    lineages_num_copy[0] - lower_split_2_out_linages_num_,
+                    lineages_num_copy[1]
+                };
+                llh_temp = smart_llh(
+                     split_2_time_, migration_time_, populations, lineages_num
+                );
+                log_prob += llh_temp;
+                
+                // Взвешиваем сценарий по вероятности миграции (долям линий, ушедших в Ghost)
+                if (migration_prob_ != 1)
+                {
+                    log_prob += lineages_num[0] * std::log(1 - migration_prob_) \
+                            + lineages_num[1] * std::log(migration_prob_);
+                }
+
+                prob_sum += std::exp(log_prob) * comb_prob;
+
+                if (sc_i == 0 && step == 0)
+                    lineage_num_lower_migration = lineages_num[0] + lineages_num[1];
+
+                // Переключение неактивной линии
+                if (step < n)
+                {
+                    size_t flip_idx = moving_up ? step : (n - 1 - step);
+                    flip_inactive_node(flip_idx);
+                }
             }
-
-            // fisrt split probabiltiy
-            // log_prob += sc_lineages_num_[0] * std::log(split_1_prop_)
-            //           + sc_lineages_num_[1] * std::log(1 - split_1_prop_);
-
-            // /|
-            // std::cout << sc_lineages_num_[0] << " / " << sc_lineages_num_[1] << std::endl;
-            populations = {base_pop_index_, ghost_pop_index_}; 
-            llh_temp = smart_llh(
-                    split_1_time_, split_2_time_, populations, sc_lineages_num_
-            );
-            log_prob += llh_temp;
-
-            // std::cout << llh_temp << std::endl;
-            // second split probability
-            // log_prob += lower_split_2_out_linages_num_ * std::log(1 - split_2_prop_)
-            //           + (sc_lineages_num_[0] - lower_split_2_out_linages_num_) * std::log(split_2_prop_);
-            // std::cout << sc_lineages_num_[0] - lower_split_2_out_linages_num_ << " / " << sc_lineages_num_[1] << std::endl;
-            // std::cout << "lower_split_2_out_linages_num_: " << lower_split_2_out_linages_num_ << std::endl;
-            populations = {base_pop_index_, ghost_pop_index_}; 
-            lineages_num = { 
-                sc_lineages_num_[0] - lower_split_2_out_linages_num_,
-                sc_lineages_num_[1]
-            };
-            // ||
-            llh_temp = smart_llh(
-                 split_2_time_, migration_time_, populations, lineages_num
-            );
-            log_prob += llh_temp;
-            // std::cout << llh_temp << std::endl;
-            // migration probability
-            // std::cout << migration_prob_ <<  std::endl;
-            if (migration_prob_ != 1)
+            
+            // Переход к следующему активному сценарию по коду Грея
+            uint64_t diff = abacaba[sc_i];
+            if (diff != 0)
             {
-                log_prob += lineages_num[0] * std::log(1 - migration_prob_) \
-                        + lineages_num[1] * std::log(migration_prob_);
+                int bit_idx = 0;
+                uint64_t temp = diff;
+                while ((temp & 1) == 0) {
+                    temp >>= 1;
+                    bit_idx++;
+                }
+                flip_active_node(active_nodes[bit_idx]);
             }
-
-            prob_sum += std::exp(log_prob);
-
-            if (sc_i == 0)
-                lineage_num_lower_migration = lineages_num[0] + lineages_num[1];
-            // std::cout << lineages_num[0] << " / " << lineages_num[1] << std::endl;
-            // std::cout << sc_i << " of " << pow(2, log_scenario_num) << " : " << log_prob << std::endl;
-            scenario = scenario ^ abacaba[sc_i];
         }
-        // std::cout << "between " << std::log(prob_sum) << std::endl;
+        
         llh += std::log(prob_sum);
-        // populations = {outgroup_pop_index_};
-        // lineages_num = {lower_split_2_out_linages_num_};
-        // llh += smart_llh(tree, split_2_time_, migration_time_, populations, lineages_num);
 
+        // Хвост ниже migration_time (все линии объединились в базовую популяцию AFR)
         populations = {base_pop_index_}; 
-        lineages_num = {
-            lineage_num_lower_migration
-            // lineages_num[0]
-        };
-        // std::cout << lineages_num[0] << " " << lineages_num[1] << std::endl;
+        lineages_num = { lineage_num_lower_migration };
         llh_temp = smart_llh(migration_time_, 0, populations, lineages_num);
-        // std::cout << "tail " << llh_temp << std::endl;
         llh += llh_temp;
+        
         return llh;
     }
 
+    // Загрузка параметров модели из вектора из 9 элементов.
     void Scenario_Computer::set_parameters(std::span<const double> parameters)
     {
         migration_time_ = parameters[0];
@@ -1206,17 +1413,19 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         split_1_time_ = parameters[2];
         
         migration_prob_ = parameters[3];
-        split_2_prop_ = parameters[4];
-        split_1_prop_ = parameters[5];
+        split_2_prop_ = parameters[4]; // Доля разделения 2, в текущей модели не используется
+        split_1_prop_ = parameters[5]; // Доля разделения 1, в текущей модели не используется
 
         N_ = {parameters[6], parameters[7], parameters[8]};
     }
 
+    // Возвращает список узлов, лежащих под split 1
     std::vector<tsk_id_t> Scenario_Computer::get_lower_nodes_split_1()
     {
         return lower_nodes_split_1_;
     }
 
+    // Вывод в консоль информации по нижним узлам split 1
     void Scenario_Computer::print_lower_nodes_split_1()
     {
         for (tsk_id_t node : lower_nodes_split_1_)

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+// Макрос проверки ошибок tskit
 #define check_tsk_error(val)                                                            \
     if (val < 0) {                                                                      \
         errx(EXIT_FAILURE, "line %d: %s", __LINE__, tsk_strerror(val));                 \
@@ -17,29 +18,34 @@
 
 namespace {
 
+// Структура конфигурации параметров командной строки
 struct Config {
-    std::string mode;
-    std::string input;
-    std::string path;
-    std::string prefix = "arg";
-    std::string suffix = ".arg";
-    std::string output;
+    std::string mode;           // Режим работы: "llh" (расчет в точке) или "grid" (на сетке параметров)
+    std::string input;          // Путь к одиночному файлу дерева (*.trees или *.arg)
+    std::string path;           // Путь к директории (для пакетного режима)
+    std::string prefix = "arg";  // Префикс файлов симуляций
+    std::string suffix = ".arg"; // Суффикс (расширение) файлов симуляций
+    std::string output;         // Путь к выходному файлу результатов
+    
+    // Вектор из 9 параметров модели по умолчанию
     std::vector<double> parameters = {
         500, 1000, 2000,
         0.2, 0.5, 0.5,
         10000, 10000, 10000
     };
-    std::vector<int> sample_population;
-    std::vector<double> grid_time = {500};
-    std::vector<double> grid_prob = {0.2};
-    std::vector<std::vector<double>> grid_N;
-    int admixed_index = 0;
-    int outgroup_index = 1;
-    size_t sim_count = 0;
-    long tree_num = 10000;
-    bool binary_output = true;
+    
+    std::vector<int> sample_population;        // Популяция каждого образца генома (0 - AFR, 2 - SAM)
+    std::vector<double> grid_time = {500};      // Сетка времени миграции
+    std::vector<double> grid_prob = {0.2};      // Сетка вероятности интрогрессии
+    std::vector<std::vector<double>> grid_N;   // Сетка эффективных размеров Ne по популяциям
+    int admixed_index = 0;                     // Индекс AFR в sample_population
+    int outgroup_index = 1;                    // Индекс SAM в sample_population
+    size_t sim_count = 0;                      // Количество симуляций в пакете
+    long tree_num = 10000;                     // Число деревьев для прореживания (интервал сэмплирования)
+    bool binary_output = true;                 // Флаг вывода результатов в бинарный (.bin), а не в текстовый формат
 };
 
+// Вывод справки по использованию CLI-интерфейса в поток std::cerr
 void print_usage(const char *program)
 {
     std::cerr
@@ -56,6 +62,7 @@ void print_usage(const char *program)
         << "  --text-output writes grid as whitespace text instead of raw doubles\n";
 }
 
+// Разделение строки delim-символом (например, запятой)
 std::vector<std::string> split(const std::string &value, char delim)
 {
     std::vector<std::string> result;
@@ -69,6 +76,7 @@ std::vector<std::string> split(const std::string &value, char delim)
     return result;
 }
 
+// Преобразование строки с запятыми в вектор вещественных чисел double
 std::vector<double> parse_doubles(const std::string &value)
 {
     std::vector<double> result;
@@ -78,6 +86,7 @@ std::vector<double> parse_doubles(const std::string &value)
     return result;
 }
 
+// Преобразование строки с запятыми в вектор целых чисел int
 std::vector<int> parse_ints(const std::string &value)
 {
     std::vector<int> result;
@@ -87,6 +96,7 @@ std::vector<int> parse_ints(const std::string &value)
     return result;
 }
 
+// Генерация сетки параметров (linspace)
 std::vector<double> linspace(double a, double b, size_t n)
 {
     if (n == 0) {
@@ -102,6 +112,8 @@ std::vector<double> linspace(double a, double b, size_t n)
     return result;
 }
 
+// Парсинг спецификации сетки. Принимает формат "start,end,count" для автоматического
+// вызова linspace, либо обычный список значений через запятую (например: "500,600,700").
 std::vector<double> parse_grid_spec(const std::string &value)
 {
     std::vector<std::string> fields = split(value, ',');
@@ -115,6 +127,7 @@ std::vector<double> parse_grid_spec(const std::string &value)
     return parse_doubles(value);
 }
 
+// Проверка наличия и извлечение значения следующего аргумента CLI
 std::string require_value(int &i, int argc, char **argv)
 {
     if (i + 1 >= argc) {
@@ -123,6 +136,7 @@ std::string require_value(int &i, int argc, char **argv)
     return argv[++i];
 }
 
+// Главный парсер аргументов CLI, возвращающий структуру Config
 Config parse_args(int argc, char **argv)
 {
     Config cfg;
@@ -181,6 +195,7 @@ Config parse_args(int argc, char **argv)
         }
     }
 
+    // Проверка ограничений и валидности переданных аргументов
     if (cfg.mode != "llh" && cfg.mode != "grid") {
         throw std::runtime_error("--mode must be either llh or grid");
     }
@@ -202,6 +217,8 @@ Config parse_args(int argc, char **argv)
     if (cfg.mode == "grid" && (cfg.grid_time.empty() || cfg.grid_prob.empty())) {
         throw std::runtime_error("--grid-time and --grid-prob must be non-empty");
     }
+    
+    // Если сетка эффективных размеров Ne не задана, инициализируем её значениями параметров по умолчанию
     if (cfg.grid_N.empty()) {
         cfg.grid_N = {{cfg.parameters[6]}, {cfg.parameters[7]}, {cfg.parameters[8]}};
     } else {
@@ -218,6 +235,7 @@ Config parse_args(int argc, char **argv)
     return cfg;
 }
 
+// Визуализация прогресса в консоли
 void print_progress(long it, long total)
 {
     const int bar_width = 50;
@@ -238,6 +256,7 @@ void print_progress(long it, long total)
     std::cout.flush();
 }
 
+// Формирует имя входного файла для i-й симуляции при пакетной обработке
 std::string batch_input_name(const Config &cfg, size_t sim_i)
 {
     std::filesystem::path path(cfg.path);
@@ -245,6 +264,7 @@ std::string batch_input_name(const Config &cfg, size_t sim_i)
     return path.string();
 }
 
+// Формирует имя выходного файла по умолчанию
 std::string default_output_name(const std::string &input, const std::string &mode, bool binary)
 {
     std::filesystem::path path(input);
@@ -252,6 +272,7 @@ std::string default_output_name(const std::string &input, const std::string &mod
     return path.replace_extension(ext).string();
 }
 
+// Сохраняет тензор результатов в бинарный формат
 void save_matrix_bin(const std::string &filename, const treellh::DenseTensor3D &tensor)
 {
     std::ofstream file(filename, std::ios::binary);
@@ -264,6 +285,7 @@ void save_matrix_bin(const std::string &filename, const treellh::DenseTensor3D &
     );
 }
 
+// Сохраняет тензор результатов в текстовый формат
 void save_matrix_text(const std::string &filename, const treellh::DenseTensor3D &tensor)
 {
     std::ofstream file(filename);
@@ -283,6 +305,7 @@ void save_matrix_text(const std::string &filename, const treellh::DenseTensor3D 
     }
 }
 
+// Сохраняет скалярное значение логарифма правдоподобия в текстовый файл
 void save_scalar_text(const std::string &filename, double value)
 {
     std::ofstream file(filename);
@@ -292,6 +315,7 @@ void save_scalar_text(const std::string &filename, double value)
     file << value << '\n';
 }
 
+// Загружает tree sequence (последовательность деревьев) из файла при помощи tskit
 tsk_treeseq_t load_ts(const std::string &filename)
 {
     tsk_treeseq_t ts;
@@ -302,6 +326,7 @@ tsk_treeseq_t load_ts(const std::string &filename)
     return ts;
 }
 
+// Расчет логарифма правдоподобия для одиночного файла при фиксированных параметрах (одна точка)
 double compute_llh_file(const Config &cfg, const std::string &input)
 {
     tsk_treeseq_t ts = load_ts(input);
@@ -314,7 +339,7 @@ double compute_llh_file(const Config &cfg, const std::string &input)
     double result = 0;
     computer.set_parameters(cfg.parameters);
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) {
-        result += computer.compute_llh(tree);
+        result += computer.compute_llh(tree); // Суммируем логарифмы по всем локальным деревьям
     }
     check_tsk_error(ret);
 
@@ -323,6 +348,7 @@ double compute_llh_file(const Config &cfg, const std::string &input)
     return result;
 }
 
+// Расчет тензора логарифмов правдоподобия для одиночного файла на сетке параметров
 treellh::DenseTensor3D compute_grid_file(const Config &cfg, const std::string &input)
 {
     tsk_treeseq_t ts = load_ts(input);
@@ -344,6 +370,7 @@ treellh::DenseTensor3D compute_grid_file(const Config &cfg, const std::string &i
 
     computer.set_parameters(cfg.parameters);
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) {
+        // Выполняем сэмплирование/прореживание локальных деревьев
         if (tree.interval.left - left_x > step) {
             print_progress(tree_c++, cfg.tree_num);
             auto temp = computer.compute_grid_fast(tree, cfg.grid_time, cfg.grid_prob, cfg.grid_N);
@@ -365,6 +392,7 @@ treellh::DenseTensor3D compute_grid_file(const Config &cfg, const std::string &i
     return result;
 }
 
+// Запуск расчета для одиночного файла (llh или grid) с выводом результатов
 void run_single(const Config &cfg, const std::string &input, const std::string &output)
 {
     if (cfg.mode == "llh") {
@@ -390,6 +418,8 @@ int main(int argc, char **argv)
 {
     try {
         Config cfg = parse_args(argc, argv);
+        
+        // Режим одиночного запуска по файлу --input
         if (!cfg.input.empty()) {
             std::string output = cfg.output;
             if (output.empty() && cfg.mode == "grid") {
@@ -399,6 +429,7 @@ int main(int argc, char **argv)
             return EXIT_SUCCESS;
         }
 
+        // Пакетный режим: итерируется по sim_count симуляциям
         for (size_t sim_i = 0; sim_i < cfg.sim_count; ++sim_i) {
             std::string input = batch_input_name(cfg, sim_i);
             std::string output;

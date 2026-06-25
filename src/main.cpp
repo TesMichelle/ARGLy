@@ -13,6 +13,7 @@
         errx(EXIT_FAILURE, "line %d: %s", __LINE__, tsk_strerror(val));                 \
     }
 
+// Печать текущего прогресса выполнения (для визуализации расчета по деревьям)
 void printProgress(int it, int total) {
     double progress = (double) it / total;
     int barWidth = 50;
@@ -28,6 +29,7 @@ void printProgress(int it, int total) {
     std::cout.flush();
 }
 
+// Генерация равномерной сетки параметров (аналог numpy.linspace)
 std::vector<double> linspace(double a, double b, size_t n)
 {
     std::vector<double> r(n, a);
@@ -38,6 +40,7 @@ std::vector<double> linspace(double a, double b, size_t n)
     return r;
 }
 
+// Вывод матрицы логарифма правдоподобия в консоль
 void print_llh(const std::vector<std::vector<double>> &llh)
 {
     for (size_t i = 0; i < llh.size(); ++i)
@@ -50,137 +53,23 @@ void print_llh(const std::vector<std::vector<double>> &llh)
     }
 }
 
-void print_llh(const std::vector<double> &llh)
-{
-    for (size_t i = 0; i < llh.size(); ++i)
-    {
-        std::cout << llh[i] << std::endl;
-    }
-}
-
-void save_matrix_bin(std::string filename, const treellh::DenseTensor3D &mtx)
+// Сохраняет тензор результатов в бинарный формат
+void save_matrix_bin(const std::string &filename, const treellh::DenseTensor3D &tensor)
 {
     std::ofstream file(filename, std::ios::binary);
-    file.write(reinterpret_cast<const char*>(mtx.data().data()), mtx.size() * sizeof(double));
-    file.close();
-}
-
-
-std::vector<double> compute_for_sample(
-    std::string path, 
-    std::vector<int> sample_population,
-    std::vector<double> parameters, 
-    const std::string prefix = "test_arg_10_sim_")
-{
-    std::vector<double> llh(100, 0);
-    for (size_t sim_i = 0; sim_i < 100; sim_i++)
-    {
-        std::cout << "sim: " << sim_i << std::endl;
-        // Загружаю АРГ 
-        int ret;
-        tsk_treeseq_t ts;
-        ret = tsk_treeseq_load(&ts, (path + prefix + std::to_string(sim_i) + ".arg").c_str(), 0);
-        if (ret != 0) {
-            fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
-            exit(EXIT_FAILURE);
-        }
-
-        // создраю вычислятор
-        treellh::Scenario_Computer computer(ts, parameters, sample_population, 0, 1);
-        tsk_tree_t tree;
-
-        // иницилизация дерева для нужного трисека
-        ret = tsk_tree_init(&tree, &ts, 0);
-        check_tsk_error(ret);
-
-
-        computer.set_parameters(parameters);
-        for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-        {
-            llh[sim_i] += computer.compute_llh(tree);
-        }
-        std::cout << llh[sim_i] << std::endl;
+    if (!file) {
+        throw std::runtime_error("cannot open output file: " + filename);
     }
-    return llh;
+    file.write(
+        reinterpret_cast<const char *>(tensor.data().data()),
+        static_cast<std::streamsize>(tensor.size() * sizeof(double))
+    );
 }
 
-// std::vector<double> estimate_for_sample(
-//     std::string path, 
-//     std::vector<double> parameters, 
-//     size_t n = 30,
-//     size_t sim_n = 100,
-//     long tree_num = 10000,
-//     const std::string prefix = "real_arg_admixed_only_50_sim_")
-// {
-
-
-//     // создаю сетку
-//     std::vector<double> time_migration = linspace(1, 7000, n);
-
-//     std::vector<double> pe(sim_n, 0);
-//     for (size_t sim_i = 0; sim_i < sim_n; sim_i++)
-//     {
-//         std::cout << "sim: " << sim_i << std::endl;
-//         // Загружаю АРГ 
-//         int ret;
-//         tsk_treeseq_t ts;
-//         ret = tsk_treeseq_load(&ts, (path + prefix + std::to_string(sim_i) + ".arg").c_str(), 0);
-//         if (ret != 0) {
-//             fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
-//             exit(EXIT_FAILURE);
-//         }
-
-//         // создраю вычислятор
-//         treellh::Scenario_Computer computer(ts, parameters, 3, 1);
-//         tsk_tree_t tree;
-
-//         // иницилизация дерева для нужного трисека
-//         ret = tsk_tree_init(&tree, &ts, 0);
-//         check_tsk_error(ret);
-
-//         // std::vector<double> mig_prob = linspace(0.01, 0.01, n);
-
-//         // правдоподобие на сетке
-//         std::vector<std::vector<double>> llh(n, std::vector<double>(n, 0));
-
-//         // рабочий цикл
-//         double seq_len = tsk_treeseq_get_sequence_length(&ts);
-//         double step = seq_len / double(tree_num);
-//         double left_x = 0;
-//         size_t max_i = 0;
-//         for (size_t i = 0; i < n; ++i)
-//         {
-//             for (size_t j = 0; j < n; ++j)
-//             {
-//                 std::cout << i << ", " << j << std::endl;
-//                 parameters[0] = time_migration[i];
-//                 computer.set_parameters(parameters);
-
-//                 // перебираю деревья
-//                 left_x = - step - 1;
-//                 for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-//                 {
-//                     if (tree.interval.left - left_x > step)
-//                     {
-//                         llh[i][j] += computer.compute_llh(tree);
-//                         left_x = tree.interval.left;
-//                     }
-//                 }
-//                 std::cout << std::endl;
-//                 if (llh[i][j] > llh[max_i][j])
-//                 {
-//                     max_i = i;
-//                 }
-//                 std::cout << llh[i][j] << "max: " << llh[max_i][j] << std::endl;
-//                 break;
-//             }
-//         }
-//         pe[sim_i] = time_migration[max_i];
-//         std::cout << "Point estimate: " << pe[sim_i] << std::endl;
-//     }
-//     return pe;
-// }
-
+// Вычисление правдоподобия на выборке ARG (последовательности деревьев) из директории path.
+// Итерируется по sim_n симуляциям (файлам arg0.arg, arg1.arg и т.д.).
+// Для каждой симуляции строит сетку параметров и вычисляет трехмерный тензор правдоподобия,
+// после чего сохраняет результаты в бинарный файл _llh.bin.
 int compute_llh_for_sample(
     std::string path,
     std::vector<int> sample_population, 
@@ -194,7 +83,7 @@ int compute_llh_for_sample(
     for (size_t sim_i = 0; sim_i < sim_n; sim_i++)
     {
         std::cout << "sim: " << sim_i << std::endl;
-        // Загружаю АРГ 
+        // Загружаю ARG
         int ret;
         tsk_treeseq_t ts;
         ret = tsk_treeseq_load(&ts, (path + prefix + std::to_string(sim_i) + ".arg").c_str(), 0);
@@ -203,32 +92,33 @@ int compute_llh_for_sample(
             exit(EXIT_FAILURE);
         }
 
-        // создраю вычислятор
+        // Создаю Scenario_Computer для текущего ARG
         treellh::Scenario_Computer computer(ts, fixed_parameters, sample_population, 0, 1);
         tsk_tree_t tree;
         computer.set_parameters(fixed_parameters);
 
-        // иницилизация дерева для нужного трисека
+        // Инициализация структуры дерева для прохода по локальным деревьям
         ret = tsk_tree_init(&tree, &ts, 0);
         check_tsk_error(ret);
 
-        // std::vector<double> mig_prob = linspace(0.01, 0.01, n);
-
-        // правдоподобие сюда
+        // Тензор для результатов расчета на сетке
         treellh::DenseTensor3D result(migration_time.size(), 1, migratioh_prob.size(), 0);
         treellh::DenseTensor3D temp;
-        // рабочий цикл
+        
+        // Рабочий цикл по локальным деревьям вдоль хромосомы
         double seq_len = tsk_treeseq_get_sequence_length(&ts);
         double step = seq_len / double(tree_num);
         double left_x = 0;
         int tree_c = 0;
-        // перебираю деревья
+        
+        // Перебираю деревья с шагом step для прореживания
         left_x = - step - 1;
         for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
         {
             if (tree.interval.left - left_x > step)
             {
                 printProgress(tree_c++, tree_num);
+                // Вычисление правдоподобия на сетке для текущего дерева
                 temp = computer.compute_grid_fast(tree, migration_time, migratioh_prob);
                 std::cout << "hello" << std::endl;
                 for (size_t i = 0; i < migration_time.size(); i++)
@@ -242,6 +132,7 @@ int compute_llh_for_sample(
             }
         }
         std::cout << std::endl;
+        // Сохранение итоговой матрицы
         save_matrix_bin(path + prefix + std::to_string(sim_i) + "_llh.bin", result);
     }
     return 0;
@@ -249,10 +140,10 @@ int compute_llh_for_sample(
 
 int main()
 { 
-    // Параметры 
-    // miration_time, split_2_time, split_1_time 
-    // migration_prop, split_2_prop, split_1_prop
-    // base_size, outgroup_size, ghost_size
+    // Начальные фиксированные параметры модели
+    // 0: migration_time, 1: split_2_time, 2: split_1_time
+    // 3: migration_prop, 4: split_2_prop, 5: split_1_prop
+    // 6: N_base, 7: N_ghost, 8: N_outgroup
     std::vector<double> parameters = {
         500, 1000, 2000,
         0.2, 0.5, 0.5,
@@ -266,69 +157,23 @@ int main()
 
     long tree_num = 1;
 
-    // Загружаю АРГ 
+    // Загружаю ARG
     int ret;
     tsk_treeseq_t ts;
     ret = tsk_treeseq_load(&ts, "my_test.trees", 0);
-    // ret = tsk_treeseq_load(&ts, "RELATE_arg/real_arg_30_sim_0.relate.ts.trees", 0);
     if (ret != 0) {
         fprintf(stderr, "Load error:%s\n", tsk_strerror(ret));
         exit(EXIT_FAILURE);
     }
 
+    // Задаем популяцию для 100 образцов (все 0 - AFR по умолчанию)
     std::vector<int> sample_population(100, 0);
     for (size_t i = 0; i < 100; ++i)
     {
         sample_population[i] = 0;
     }
-    // создраю вычислятор
-    // treellh::Scenario_Computer computer(ts, parameters, sample_population, 1, 0);
-    // tsk_tree_t tree;
-    // computer.set_parameters(parameters);
 
-    // // иницилизация дерева для нужного трисека
-    // ret = tsk_tree_init(&tree, &ts, 0);
-    // check_tsk_error(ret);
-
-    // // samples
-    // const tsk_id_t *samples = tsk_treeseq_get_samples(&ts);
-    // const tsk_size_t samples_num = tsk_treeseq_get_num_samples(&ts);
-
-    // std::vector<tsk_id_t> samples_out(samples, samples + 8);
-    // std::vector<tsk_id_t> samples_adm(samples + 8, samples + 16); 
-
-    // // правдоподобие сюда
-    // std::vector<std::vector<double>> result(migration_time.size(), std::vector<double>(migration_prob.size(), 0));
-    // std::vector<std::vector<double>> temp;
-    // // рабочий цикл
-    // double seq_len = tsk_treeseq_get_sequence_length(&ts);
-    // double step = seq_len / double(tree_num);
-    // double left_x = 0;
-    // int tree_c = 0;
-    // // перебираю деревья
-    // left_x = - step - 1;
-    // for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) 
-    // {
-    //     if (tree.interval.left - left_x > step)
-    //     {
-    //         printProgress(tree_c++, tree_num);
-    //         // std::cout << tree.index << std::endl;
-    //         // parameters[1] = computer.find_lowest_coal(tree, samples_out, samples_adm);
-    //         computer.set_parameters(parameters);
-    //         temp = computer.compute_grid_fast(tree, migration_time, migration_prob);
-    //         for (size_t i = 0; i < migration_time.size(); i++)
-    //         {
-    //             for (size_t j = 0; j < migration_prob.size(); ++j)
-    //             {            
-    //                 result[i][j] += temp[i][j];
-    //             }
-    //         }
-    //         left_x = tree.interval.left;
-    //     }
-    // }
-    // std::cout << std::endl;
-    // std::cout << result[0][0] << '\n';
-    // save_matrix_bin("my_test.llh.bin", result);
+    tsk_treeseq_free(&ts);
 
     compute_llh_for_sample("arg_files/", sample_population, parameters, migration_time, migration_prob, 100, 1);
 
