@@ -1,10 +1,14 @@
 #include <treellh.h>
 
+#include <algorithm>
 #include <err.h>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,6 +34,7 @@ struct Config {
         10000, 10000, 10000
     };
     std::vector<int> sample_population;
+    tsk_id_t sample_id = TSK_NULL;
     std::vector<double> grid_time = {500};
     std::vector<double> grid_prob = {0.2};
     std::vector<std::vector<double>> grid_N;
@@ -45,11 +50,16 @@ void print_usage(const char *program)
     std::cerr
         << "Usage:\n"
         << "  " << program << " --mode llh  --input FILE --sample-population LIST --params LIST [--output FILE]\n"
+        << "  " << program << " --mode ratio --input FILE --sample-population LIST --params LIST --sample-id ID [--output FILE]\n"
         << "  " << program << " --mode grid --input FILE --sample-population LIST --params LIST --grid-time SPEC --grid-prob SPEC --output FILE\n"
         << "  " << program << " --mode grid --path DIR --prefix PREFIX --sim-count N [--suffix .arg] ...\n\n"
+        << "  ratio also accepts --path DIR --prefix PREFIX --sim-count N [--suffix .arg]\n\n"
         << "Parameters:\n"
         << "  --params mt,split2,split1,mp,split2p,split1p,Nbase,Nghost,Noutgroup\n"
         << "  --sample-population comma-separated population id per sample node id\n"
+        << "  --sample-id tskit node ID of the sample to classify (ratio mode)\n"
+        << "  ratio output: one TSV row per tree: tree_index, left, right, log_base, log_ghost, log_ratio\n"
+        << "  log_ratio = log_base - log_ghost; log_base/log_ghost are log likelihoods\n"
         << "  --grid-time and --grid-prob accept either a,b,n or comma-separated values\n"
         << "  --grid-N-base, --grid-N-ghost and --grid-N-outgroup add an N grid axis\n"
         << "  --tree-num K samples approximately K trees along the sequence\n"
@@ -147,6 +157,14 @@ Config parse_args(int argc, char **argv)
             cfg.parameters = parse_doubles(require_value(i, argc, argv));
         } else if (arg == "--sample-population") {
             cfg.sample_population = parse_ints(require_value(i, argc, argv));
+        } else if (arg == "--sample-id") {
+            std::string value = require_value(i, argc, argv);
+            size_t parsed = 0;
+            long id = std::stol(value, &parsed);
+            if (parsed != value.size() || id < 0 || id > std::numeric_limits<tsk_id_t>::max()) {
+                throw std::runtime_error("--sample-id must be a nonnegative node ID");
+            }
+            cfg.sample_id = static_cast<tsk_id_t>(id);
         } else if (arg == "--grid-time") {
             cfg.grid_time = parse_grid_spec(require_value(i, argc, argv));
         } else if (arg == "--grid-prob") {
@@ -181,8 +199,8 @@ Config parse_args(int argc, char **argv)
         }
     }
 
-    if (cfg.mode != "llh" && cfg.mode != "grid") {
-        throw std::runtime_error("--mode must be either llh or grid");
+    if (cfg.mode != "llh" && cfg.mode != "grid" && cfg.mode != "ratio") {
+        throw std::runtime_error("--mode must be llh, grid, or ratio");
     }
     if (cfg.input.empty() && (cfg.path.empty() || cfg.sim_count == 0)) {
         throw std::runtime_error("provide either --input FILE or --path DIR --sim-count N");
@@ -195,6 +213,9 @@ Config parse_args(int argc, char **argv)
     }
     if (cfg.sample_population.empty()) {
         throw std::runtime_error("--sample-population is required");
+    }
+    if (cfg.mode == "ratio" && cfg.sample_id == TSK_NULL) {
+        throw std::runtime_error("--sample-id is required in ratio mode");
     }
     if (cfg.tree_num <= 0) {
         throw std::runtime_error("--tree-num must be positive");
@@ -248,7 +269,8 @@ std::string batch_input_name(const Config &cfg, size_t sim_i)
 std::string default_output_name(const std::string &input, const std::string &mode, bool binary)
 {
     std::filesystem::path path(input);
-    std::string ext = mode == "grid" ? (binary ? ".llh.bin" : ".llh.txt") : ".llh.txt";
+    std::string ext = mode == "grid" ? (binary ? ".llh.bin" : ".llh.txt")
+        : (mode == "ratio" ? ".ratio.tsv" : ".llh.txt");
     return path.replace_extension(ext).string();
 }
 
@@ -323,6 +345,51 @@ double compute_llh_file(const Config &cfg, const std::string &input)
     return result;
 }
 
+void compute_ratio_file(const Config &cfg, const std::string &input, std::ostream &out)
+{
+    tsk_treeseq_t ts = load_ts(input);
+    const tsk_size_t node_count = tsk_treeseq_get_num_nodes(&ts);
+    if (static_cast<tsk_size_t>(cfg.sample_id) >= node_count
+        || !(ts.tables->nodes.flags[cfg.sample_id] & TSK_NODE_IS_SAMPLE)) {
+        tsk_treeseq_free(&ts);
+        throw std::runtime_error("--sample-id must identify a sample node in " + input);
+    }
+    const tsk_id_t *samples = tsk_treeseq_get_samples(&ts);
+    const tsk_size_t sample_count = tsk_treeseq_get_num_samples(&ts);
+    tsk_id_t max_sample_id = cfg.sample_id;
+    for (tsk_size_t i = 0; i < sample_count; ++i) {
+        max_sample_id = std::max(max_sample_id, samples[i]);
+    }
+    if (cfg.sample_population.size() <= static_cast<size_t>(max_sample_id)) {
+        tsk_treeseq_free(&ts);
+        throw std::runtime_error("--sample-population needs an entry for every sample node ID in " + input);
+    }
+
+    treellh::Scenario_Computer computer(
+        ts, cfg.parameters, cfg.sample_population, cfg.admixed_index, cfg.outgroup_index);
+    tsk_tree_t tree;
+    int ret = tsk_tree_init(&tree, &ts, 0);
+    check_tsk_error(ret);
+
+    out << "tree_index\tleft\tright\tlog_base\tlog_ghost\tlog_ratio\n";
+    out << std::setprecision(std::numeric_limits<double>::max_digits10);
+    size_t tree_index = 0;
+    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) {
+        const auto [log_base, log_ghost] = computer.compute_llh_ratio(
+            tree, cfg.parameters, cfg.sample_id);
+        double log_ratio = log_base - log_ghost;
+        if (std::isinf(log_base) && std::isinf(log_ghost)
+            && log_base < 0 && log_ghost < 0) {
+            log_ratio = std::numeric_limits<double>::quiet_NaN();
+        }
+        out << tree_index++ << '\t' << tree.interval.left << '\t' << tree.interval.right
+            << '\t' << log_base << '\t' << log_ghost << '\t' << log_ratio << '\n';
+    }
+    check_tsk_error(ret);
+    tsk_tree_free(&tree);
+    tsk_treeseq_free(&ts);
+}
+
 treellh::DenseTensor3D compute_grid_file(const Config &cfg, const std::string &input)
 {
     tsk_treeseq_t ts = load_ts(input);
@@ -374,6 +441,16 @@ void run_single(const Config &cfg, const std::string &input, const std::string &
         } else {
             save_scalar_text(output, llh);
         }
+    } else if (cfg.mode == "ratio") {
+        if (output.empty()) {
+            compute_ratio_file(cfg, input, std::cout);
+        } else {
+            std::ofstream file(output);
+            if (!file) {
+                throw std::runtime_error("cannot open output file: " + output);
+            }
+            compute_ratio_file(cfg, input, file);
+        }
     } else {
         auto matrix = compute_grid_file(cfg, input);
         if (cfg.binary_output) {
@@ -405,7 +482,8 @@ int main(int argc, char **argv)
             if (!cfg.output.empty()) {
                 std::filesystem::path out_dir(cfg.output);
                 output = (out_dir / (cfg.prefix + std::to_string(sim_i)
-                    + (cfg.mode == "grid" ? (cfg.binary_output ? "_llh.bin" : "_llh.txt") : "_llh.txt"))).string();
+                    + (cfg.mode == "grid" ? (cfg.binary_output ? "_llh.bin" : "_llh.txt")
+                        : (cfg.mode == "ratio" ? "_ratio.tsv" : "_llh.txt")))).string();
             } else {
                 output = default_output_name(input, cfg.mode, cfg.binary_output);
             }

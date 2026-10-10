@@ -575,7 +575,7 @@ namespace treellh
     }
 
     /** 
-    * @brief Вычисляет правдоподобие дерева на заданном участке.
+    * @brief Вычисляет правдоподобие дерева на заданном участке времени.
     * 
     * @param tree объект дерева в формате `tsk_tree_t`.
     * @param time_start верхняя граница временного интервала.
@@ -929,6 +929,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             std::fill(structure_lineage_num_data.begin(), structure_lineage_num_data.end(), 0);
             // std::cout << std::bitset<6>(scenario) << std::endl;
             set_scenario(tree, scenario);
+            const int split_lineages[2] = {sc_lineages_num_[0], sc_lineages_num_[1]};
 #ifndef NDEBUG
             err_id = check_scenario(tree);
             if (err_id != 0)
@@ -997,9 +998,9 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                 }
 
                 lineages_num_total = 0;
-                lineages_between[0] = structure_lineage_num(node_id, 0); 
-                lineages_between[1] = structure_lineage_num(node_id, 1); 
-                if (split_2_time_ <= nodes_[prev_node_id].time) // prev_time <= split_2 <= migration <= node_time
+                lineages_between[0] = structure_lineage_num(node_id, 0);
+                lineages_between[1] = structure_lineage_num(node_id, 1);
+                if (split_2_time_ <= nodes_[prev_node_id].time)
                     lineages_between[0] += lower_split_2_out_linages_num_;
                 for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
                 {
@@ -1008,20 +1009,34 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
 
                 for (size_t n_i = 0; n_i < N_grid_size; ++n_i)
                 {
-                    llh_step = log_inv_2N(nodes_[prev_node_id].population, n_i);
-                    for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                    if (nodes_[prev_node_id].time >= split_1_time_)
                     {
-                        llh_step += (
-                            -lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2. * inv_2N(populations[pop_i], n_i) 
-                            * (nodes_[prev_node_id].time - split_2_time_) // between prev_time and split.
-                        );
-                        llh_step += (
-                            -structure_lineage_num(node_id, pop_i) * (structure_lineage_num(node_id, pop_i) - 1) / 2. * inv_2N(populations[pop_i], n_i) 
-                            * (split_2_time_ - t) // between split and migration removing splited lineages.
-                        );
+                        llh_for_sc = 0;
+                        for (size_t pop_i = 0; pop_i < populations.size(); ++pop_i)
+                        {
+                            const int at_split = split_lineages[pop_i];
+                            const int after_split_2 = at_split -
+                                (pop_i == 0 ? lower_split_2_out_linages_num_ : 0);
+                            llh_for_sc -= at_split * (at_split - 1) / 2.0
+                                * inv_2N(populations[pop_i], n_i) * (split_1_time_ - split_2_time_);
+                            llh_for_sc -= after_split_2 * (after_split_2 - 1) / 2.0
+                                * inv_2N(populations[pop_i], n_i) * (split_2_time_ - t);
+                        }
                     }
-
-                    llh_for_sc = structure_llh(prev_node_id, n_i) + llh_step;
+                    else
+                    {
+                        llh_step = log_inv_2N(nodes_[prev_node_id].population, n_i);
+                        for (size_t pop_i = 0; pop_i < populations.size(); pop_i++)
+                        {
+                            llh_step -= lineages_between[pop_i] * (lineages_between[pop_i] - 1) / 2.0
+                                * inv_2N(populations[pop_i], n_i)
+                                * (nodes_[prev_node_id].time - split_2_time_);
+                            llh_step -= structure_lineage_num(node_id, pop_i)
+                                * (structure_lineage_num(node_id, pop_i) - 1) / 2.0
+                                * inv_2N(populations[pop_i], n_i) * (split_2_time_ - t);
+                        }
+                        llh_for_sc = structure_llh(prev_node_id, n_i) + llh_step;
+                    }
                     const int base_lineages = structure_lineage_num(node_id, 0);
                     const int ghost_lineages = structure_lineage_num(node_id, 1);
                     for (size_t j = 0; j < migration_prob.size(); ++j)
@@ -1197,6 +1212,106 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         // std::cout << "tail " << llh_temp << std::endl;
         llh += llh_temp;
         return llh;
+    }
+
+    std::pair<double, double> Scenario_Computer::compute_llh_ratio(
+        const tsk_tree_t& tree, std::span<const double> parameters, tsk_id_t sample_id)
+    {
+        if (parameters.size() != 9)
+            throw std::invalid_argument("compute_llh_ratio requires nine parameters");
+        if (sample_id < 0 || static_cast<tsk_size_t>(sample_id) >= tsk_treeseq_get_num_nodes(&ts_)
+            || !(ts_.tables->nodes.flags[sample_id] & TSK_NODE_IS_SAMPLE)
+            || tree.parent[sample_id] == TSK_NULL)
+            throw std::invalid_argument("sample_id must be a sample in the tree");
+        if (tsk_tree_get_num_roots(&tree) != 1)
+            throw std::invalid_argument("compute_llh_ratio requires a single-root tree");
+
+        set_parameters(parameters);
+        for (auto &node : nodes_)
+            node.population = -1;
+        sort_by_time(tree);
+        compute_lower_nodes_split_1(tree);
+        compute_fixed_nodes(tree);
+        if (check_imposible_split_2(tree) != 0)
+        {
+            const double minus_inf = -std::numeric_limits<double>::infinity();
+            return {minus_inf, minus_inf};
+        }
+        const int scenario_bits = compute_log_scenarios_num();
+        if (scenario_bits >= 63)
+            throw std::overflow_error("too many migration scenarios");
+
+        // Identify the lineage containing the sample at the first split.
+        tsk_id_t split_node = sample_id;
+        while (tree.parent[split_node] != TSK_NULL
+            && ts_.tables->nodes.time[tree.parent[split_node]] <= split_1_time_)
+            split_node = tree.parent[split_node];
+        int sample_bit = -1;
+        int bit = 0;
+        for (tsk_id_t id : lower_nodes_split_1_)
+        {
+            if (!nodes_[id].is_fixed)
+            {
+                if (id == split_node)
+                    sample_bit = bit;
+                ++bit;
+            }
+        }
+        if (sample_bit == -1 &&
+            std::find(lower_nodes_split_1_.begin(), lower_nodes_split_1_.end(), split_node)
+                == lower_nodes_split_1_.end())
+            throw std::invalid_argument("sample lineage does not cross the first split");
+
+        const double minus_inf = -std::numeric_limits<double>::infinity();
+        auto log_add = [minus_inf](double a, double b) {
+            if (a == minus_inf) return b;
+            if (b == minus_inf) return a;
+            const double m = std::max(a, b);
+            return m + std::log(std::exp(a - m) + std::exp(b - m));
+        };
+        double sums[2] = {minus_inf, minus_inf};
+        std::vector<int> populations = {base_pop_index_};
+        int root_lineages[] = {1};
+        const double root_time = ts_.tables->nodes.time[time_ordered_tree_nodes_ids_[0]];
+        double common = 0;
+        if (root_time > split_1_time_)
+            common += smart_llh(root_time, split_1_time_, populations, root_lineages);
+
+        const uint64_t scenario_count = 1ULL << scenario_bits;
+        int total_lineages = -1;
+        for (uint64_t scenario = 0; scenario < scenario_count; ++scenario)
+        {
+            set_scenario(tree, scenario);
+            populations = {base_pop_index_, ghost_pop_index_};
+            double log_weight = smart_llh(
+                split_1_time_, split_2_time_, populations, sc_lineages_num_);
+            int lineages[] = {
+                sc_lineages_num_[0] - lower_split_2_out_linages_num_,
+                sc_lineages_num_[1]
+            };
+            log_weight += smart_llh(split_2_time_, migration_time_, populations, lineages);
+            if (migration_prob_ == 0)
+            {
+                if (lineages[1] != 0) log_weight = minus_inf;
+            }
+            else if (migration_prob_ == 1)
+            {
+                if (lineages[0] != 0) log_weight = minus_inf;
+            }
+            else
+            {
+                log_weight += lineages[0] * std::log1p(-migration_prob_)
+                    + lineages[1] * std::log(migration_prob_);
+            }
+            const int origin = sample_bit < 0 ? 0 : static_cast<int>((scenario >> sample_bit) & 1ULL);
+            sums[origin] = log_add(sums[origin], log_weight);
+            if (total_lineages == -1)
+                total_lineages = lineages[0] + lineages[1];
+        }
+        populations = {base_pop_index_};
+        int tail_lineages[] = {total_lineages};
+        common += smart_llh(migration_time_, 0, populations, tail_lineages);
+        return {common + sums[0], common + sums[1]};
     }
 
     void Scenario_Computer::set_parameters(std::span<const double> parameters)

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 #include <tskit.h>
 
 #include <iostream>
@@ -211,6 +212,11 @@ namespace treellh
                 std::vector<std::vector<double>> = {});
 
             double compute_llh(const tsk_tree_t&);
+
+            // Log likelihoods for scenarios where sample_id originates from
+            // the base population and from the ghost population, respectively.
+            std::pair<double, double> compute_llh_ratio(
+                const tsk_tree_t&, std::span<const double> parameters, tsk_id_t sample_id);
 
             void set_parameters(std::span<const double>);
             std::vector<tsk_id_t> get_lower_nodes_split_1();
