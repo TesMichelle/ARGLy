@@ -1,3 +1,5 @@
+#pragma once
+
 #include <vector>
 #include <span>
 #include <cmath>
@@ -143,6 +145,7 @@ namespace treellh
 
     class Scenario_Computer
     {
+        friend class TreeLikelihoodCache;
         private:
             const tsk_treeseq_t &ts_;
             std::vector<int> sample_population_;
@@ -210,6 +213,9 @@ namespace treellh
             DenseTensor3D compute_grid_fast(
                 const tsk_tree_t &, std::vector<double>, std::vector<double>,
                 std::vector<std::vector<double>> = {});
+            std::pair<DenseTensor3D, DenseTensor3D> compute_grid_ratio_fast(
+                const tsk_tree_t &, std::vector<double>, std::vector<double>,
+                std::vector<std::vector<double>>, tsk_id_t sample_id);
 
             double compute_llh(const tsk_tree_t&);
 
@@ -217,6 +223,14 @@ namespace treellh
             // the base population and from the ghost population, respectively.
             std::pair<double, double> compute_llh_ratio(
                 const tsk_tree_t&, std::span<const double> parameters, tsk_id_t sample_id);
+
+        private:
+            DenseTensor3D compute_grid_fast_impl(
+                const tsk_tree_t &, std::vector<double>, std::vector<double>,
+                std::vector<std::vector<double>>, tsk_id_t,
+                DenseTensor3D* ghost_result);
+
+        public:
 
             void set_parameters(std::span<const double>);
             std::vector<tsk_id_t> get_lower_nodes_split_1();

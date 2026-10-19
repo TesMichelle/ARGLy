@@ -30,6 +30,9 @@ CXXFLAGS ?= -O3 -DNDEBUG
 CXXSTD ?= -std=c++20
 LDFLAGS ?=
 LDLIBS ?= -lm
+NLOPT_PREFIX ?= $(shell brew --prefix nlopt 2>/dev/null)
+NLOPT_CFLAGS ?= $(if $(NLOPT_PREFIX),-I$(NLOPT_PREFIX)/include,$(shell pkg-config --cflags nlopt 2>/dev/null))
+NLOPT_LIBS ?= $(if $(NLOPT_PREFIX),-L$(NLOPT_PREFIX)/lib -lnlopt,$(shell pkg-config --libs nlopt 2>/dev/null || printf '%s' '-lnlopt'))
 
 COMMON_CPPFLAGS := \
 	-I$(TREELLH_DIR) \
@@ -50,22 +53,39 @@ TREELLH_CPP_SOURCE := $(TREELLH_DIR)/treellh.cpp
 
 TSKIT_OBJECTS := $(patsubst $(TSKIT_DIR)/tskit/%.c,$(OBJ_DIR)/tskit/%.o,$(TSKIT_C_SOURCES))
 KASTORE_OBJECT := $(OBJ_DIR)/kastore/kastore.o
-TREELLH_OBJECT := $(OBJ_DIR)/treellh/treellh.o
+TREELLH_OBJECT := $(OBJ_DIR)/treellh/treellh.o $(OBJ_DIR)/treellh/likelihood_cache.o
 
 TSKIT_LIB := $(LIB_DIR)/libtskit.a
 KASTORE_LIB := $(LIB_DIR)/libkastore.a
 TREELLH_LIB := $(LIB_DIR)/libtreellh.a
 
-BINARIES := $(BUILD_DIR)/argly $(BUILD_DIR)/main
+BINARIES := $(BUILD_DIR)/argly $(BUILD_DIR)/main $(BUILD_DIR)/argly-epoch-fit
 
 .PHONY: all clean distclean install tskit
 
 all: $(BINARIES)
 
+$(BUILD_DIR)/argly-epoch-fit: $(SRC_DIR)/epoch_cli.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(SRC_DIR)/epoch_model.h $(SRC_DIR)/epoch_fit.h $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) $(LDFLAGS) -o $@ $(SRC_DIR)/epoch_cli.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(NLOPT_LIBS) $(LDLIBS)
+
+$(BUILD_DIR)/epoch_test: $(SRC_DIR)/epoch_test.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(SRC_DIR)/epoch_model.h $(SRC_DIR)/epoch_fit.h $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) $(LDFLAGS) -o $@ $(SRC_DIR)/epoch_test.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(NLOPT_LIBS) $(LDLIBS)
+
+.PHONY: test-epoch
+test-epoch: $(BUILD_DIR)/epoch_test
+	$(BUILD_DIR)/epoch_test
+
+.PHONY: test-cache
+test-cache: $(BUILD_DIR)/cache_test
+	$(BUILD_DIR)/cache_test
+
+$(BUILD_DIR)/cache_test: $(SRC_DIR)/cache_test.cpp $(TREELLH_DIR)/likelihood_cache.h $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) $(LDFLAGS) -o $@ $(SRC_DIR)/cache_test.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(LDLIBS)
+
 tskit: $(TSKIT_STAMP)
 
-$(BUILD_DIR)/argly: $(OBJ_DIR)/argly_cli.o $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+$(BUILD_DIR)/argly: $(OBJ_DIR)/argly_cli.o $(OBJ_DIR)/fit_search.o $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
+	$(CXX) $(LDFLAGS) -o $@ $^ $(NLOPT_LIBS) $(LDLIBS)
 
 $(BUILD_DIR)/main: $(OBJ_DIR)/main.o $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -79,14 +99,20 @@ $(TSKIT_LIB): $(TSKIT_OBJECTS) | $(LIB_DIR)
 $(KASTORE_LIB): $(KASTORE_OBJECT) | $(LIB_DIR)
 	$(AR) rcs $@ $^
 
-$(OBJ_DIR)/argly_cli.o: $(TSKIT_STAMP) $(SRC_DIR)/argly_cli.cpp $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)
+$(OBJ_DIR)/argly_cli.o: $(TSKIT_STAMP) $(SRC_DIR)/argly_cli.cpp $(SRC_DIR)/fit_search.h $(TREELLH_DIR)/treellh.h $(TREELLH_DIR)/likelihood_cache.h | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(SRC_DIR)/argly_cli.cpp -o $@
+
+$(OBJ_DIR)/fit_search.o: $(SRC_DIR)/fit_search.cpp $(SRC_DIR)/fit_search.h $(TREELLH_DIR)/likelihood_cache.h | $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(SRC_DIR)/fit_search.cpp -o $@
 
 $(OBJ_DIR)/main.o: $(TSKIT_STAMP) $(SRC_DIR)/main.cpp $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(SRC_DIR)/main.cpp -o $@
 
 $(OBJ_DIR)/treellh/treellh.o: $(TSKIT_STAMP) $(TREELLH_CPP_SOURCE) $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)/treellh
 	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(TREELLH_CPP_SOURCE) -o $@
+
+$(OBJ_DIR)/treellh/likelihood_cache.o: $(TSKIT_STAMP) $(TREELLH_DIR)/likelihood_cache.cpp $(TREELLH_DIR)/likelihood_cache.h $(TREELLH_DIR)/treellh.h | $(OBJ_DIR)/treellh
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CXXFLAGS) $(CXXSTD) -c $(TREELLH_DIR)/likelihood_cache.cpp -o $@
 
 $(OBJ_DIR)/tskit/%.o: $(TSKIT_STAMP) $(TSKIT_DIR)/tskit/%.c | $(OBJ_DIR)/tskit
 	$(CC) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(CFLAGS) -std=c99 -c $(TSKIT_DIR)/tskit/$*.c -o $@
@@ -112,7 +138,7 @@ $(BUILD_DIR) $(OBJ_DIR) $(OBJ_DIR)/treellh $(OBJ_DIR)/tskit $(OBJ_DIR)/kastore $
 
 install: all
 	$(MKDIR_P) $(DESTDIR)$(BINDIR)
-	cp $(BUILD_DIR)/argly $(BUILD_DIR)/main $(DESTDIR)$(BINDIR)/
+	cp $(BINARIES) $(DESTDIR)$(BINDIR)/
 
 clean:
 	$(RM) -r $(BUILD_DIR)

@@ -7,6 +7,14 @@ namespace treellh
 {
     namespace
     {
+        double log_add_exp(double a, double b)
+        {
+            const double minus_inf = -std::numeric_limits<double>::infinity();
+            if (a == minus_inf) return b;
+            if (b == minus_inf) return a;
+            return std::max(a, b) + std::log1p(std::exp(-std::abs(a - b)));
+        }
+
         double grid_N_value(
             const std::vector<std::vector<double>>& N_grid,
             int population,
@@ -712,10 +720,36 @@ namespace treellh
 
 
 DenseTensor3D Scenario_Computer::compute_grid_fast(
+        const tsk_tree_t& tree, std::vector<double> migration_time,
+        std::vector<double> migration_prob, std::vector<std::vector<double>> N)
+    {
+        return compute_grid_fast_impl(tree, std::move(migration_time),
+            std::move(migration_prob), std::move(N), TSK_NULL, nullptr);
+    }
+
+std::pair<DenseTensor3D, DenseTensor3D> Scenario_Computer::compute_grid_ratio_fast(
+        const tsk_tree_t& tree, std::vector<double> migration_time,
+        std::vector<double> migration_prob, std::vector<std::vector<double>> N,
+        tsk_id_t sample_id)
+    {
+        if (tsk_tree_get_num_roots(&tree) != 1)
+            throw std::invalid_argument("compute_grid_ratio_fast requires a single-root tree");
+        if (sample_id < 0 || static_cast<tsk_size_t>(sample_id) >= tsk_treeseq_get_num_nodes(&ts_)
+            || !(ts_.tables->nodes.flags[sample_id] & TSK_NODE_IS_SAMPLE)
+            || tree.parent[sample_id] == TSK_NULL)
+            throw std::invalid_argument("sample_id must be a sample in the tree");
+        DenseTensor3D ghost;
+        auto base = compute_grid_fast_impl(tree, std::move(migration_time),
+            std::move(migration_prob), std::move(N), sample_id, &ghost);
+        return {std::move(base), std::move(ghost)};
+    }
+
+DenseTensor3D Scenario_Computer::compute_grid_fast_impl(
         const tsk_tree_t& tree, 
         std::vector<double> migration_time,
         std::vector<double> migration_prob,
-        std::vector<std::vector<double>> N
+        std::vector<std::vector<double>> N,
+        tsk_id_t sample_id, DenseTensor3D* ghost_result
     ) 
     {
         if (N.empty())
@@ -783,18 +817,23 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             else
             {
                 log_migration_prob[j] = std::log(p);
-                log_no_migration_prob[j] = std::log(1.0 - p);
+                log_no_migration_prob[j] = std::log1p(-p);
             }
         }
     
-        DenseTensor3D result_tensor(migration_time.size(), N_grid_size, migration_prob.size(), 0);
+        const double minus_inf = -std::numeric_limits<double>::infinity();
+        DenseTensor3D result_tensor(migration_time.size(), N_grid_size, migration_prob.size(), minus_inf);
         DoubleTensor3DView result = result_tensor.view();
+        if (ghost_result)
+            *ghost_result = DenseTensor3D(migration_time.size(), N_grid_size,
+                migration_prob.size(), minus_inf);
+        DoubleTensor3DView ghost = ghost_result ? ghost_result->view() : result_tensor.view();
 
         tsk_size_t roots_num = tsk_tree_get_num_roots(&tree);
 
         if (roots_num != 1)
         {
-            std::cout << "Roots number is not equal to 1. Skipping the tree." << std::endl;
+            std::cerr << "Roots number is not equal to 1. Skipping the tree." << std::endl;
             return result_tensor;
         }
 
@@ -816,12 +855,35 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         int impossible_coal_node = check_imposible_split_2(tree);
         if (impossible_coal_node != 0)
         {
-            std::cout << "impossible scenario (coalescence between two isolated populations)." << std::endl;
-            std::cout << "Coalescence node (" << impossible_coal_node << ")." << std::endl;
+            std::cerr << "impossible scenario (coalescence between two isolated populations)." << std::endl;
+            std::cerr << "Coalescence node (" << impossible_coal_node << ")." << std::endl;
             return result_tensor;
         }
 
         int log_scenario_num = compute_log_scenarios_num();
+        if (ghost_result && log_scenario_num >= 63)
+            throw std::overflow_error("too many migration scenarios");
+
+        int sample_bit = -1;
+        if (ghost_result)
+        {
+            tsk_id_t split_node = sample_id;
+            while (tree.parent[split_node] != TSK_NULL
+                && ts_.tables->nodes.time[tree.parent[split_node]] <= split_1_time_)
+                split_node = tree.parent[split_node];
+            int bit = 0;
+            bool found = false;
+            for (tsk_id_t id : lower_nodes_split_1_)
+            {
+                if (id == split_node) found = true;
+                if (!nodes_[id].is_fixed)
+                {
+                    if (id == split_node) sample_bit = bit;
+                    ++bit;
+                }
+            }
+            if (!found) throw std::invalid_argument("sample lineage does not cross the first split");
+        }
 
         std::vector<int> lineages_num;
         std::vector<int> populations;
@@ -899,7 +961,7 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
 
         if (log_scenario_num >= 20)
         {
-            std::cout << "Attention! Memory need: " << (1 << (log_scenario_num - 10 - 10)) * sizeof(double) * 4 * number_of_nodes / 1024. << " gB." << std::endl;
+            std::cerr << "Attention! Memory need: " << (1 << (log_scenario_num - 10 - 10)) * sizeof(double) * 4 * number_of_nodes / 1024. << " gB." << std::endl;
         }
 
 #ifndef NDEBUG
@@ -925,6 +987,8 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         double t = 0;
         for (size_t sc_i = 0; sc_i < abacaba.size(); sc_i++)
         {
+            const bool ghost_origin = ghost_result && sample_bit >= 0
+                && ((scenario >> sample_bit) & 1ULL);
             std::fill(structure_llh_data.begin(), structure_llh_data.end(), 0);
             std::fill(structure_lineage_num_data.begin(), structure_lineage_num_data.end(), 0);
             // std::cout << std::bitset<6>(scenario) << std::endl;
@@ -934,13 +998,13 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
             err_id = check_scenario(tree);
             if (err_id != 0)
             {
-                std::cout << "Error scenario: " << err_id << std::endl;
-                std::cout << nodes_[err_id].is_fixed << std::endl;
-                std::cout << nodes_[err_id].population << std::endl;
-                std::cout << ts_.tables->nodes.population[err_id] << std::endl;
-                std::cout << tree.tree_sequence->tables->nodes.time[err_id] << std::endl; 
-                std::cout << nodes_[tree.parent[err_id]].population << std::endl;
-                std::cout << ts_.tables->nodes.time[tree.parent[err_id]] << std::endl;
+                std::cerr << "Error scenario: " << err_id << std::endl;
+                std::cerr << nodes_[err_id].is_fixed << std::endl;
+                std::cerr << nodes_[err_id].population << std::endl;
+                std::cerr << ts_.tables->nodes.population[err_id] << std::endl;
+                std::cerr << tree.tree_sequence->tables->nodes.time[err_id] << std::endl;
+                std::cerr << nodes_[tree.parent[err_id]].population << std::endl;
+                std::cerr << ts_.tables->nodes.time[tree.parent[err_id]] << std::endl;
                 break;
             }
 #endif
@@ -990,7 +1054,13 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                         {
                             for (size_t j = 0; j < migration_prob.size(); ++j)
                             {
-                                result(i, n_i, j) = llh_root[n_i] + no_structure_llh(node_id, n_i);
+                                const double all = llh_root[n_i] + no_structure_llh(node_id, n_i);
+                                if (ghost_result && sample_bit >= 0)
+                                {
+                                    result(i, n_i, j) = all + log_no_migration_prob[j];
+                                    ghost(i, n_i, j) = all + log_migration_prob[j];
+                                }
+                                else result(i, n_i, j) = all;
                             }
                         }
                     }
@@ -1054,7 +1124,8 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                             mig_prob = base_lineages * log_no_migration_prob[j]
                                 + ghost_lineages * log_migration_prob[j];
                         }
-                        result(i, n_i, j) += std::exp(llh_for_sc + mig_prob);
+                        double& component = ghost_origin ? ghost(i, n_i, j) : result(i, n_i, j);
+                        component = log_add_exp(component, llh_for_sc + mig_prob);
                     }
                     if (sc_i == abacaba.size() - 1)
                     {
@@ -1064,9 +1135,12 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
                         );
                         for (size_t j = 0; j < migration_prob.size(); ++j)
                         {
-                            result(i, n_i, j) = llh_root[n_i] + std::log(result(i, n_i, j))
+                            result(i, n_i, j) = llh_root[n_i] + result(i, n_i, j)
                                 + no_structure_llh(node_id, n_i)
                                 + llh_step_r;
+                            if (ghost_result)
+                                ghost(i, n_i, j) = llh_root[n_i] + ghost(i, n_i, j)
+                                    + no_structure_llh(node_id, n_i) + llh_step_r;
                         }
                     }
                 }
@@ -1310,6 +1384,9 @@ DenseTensor3D Scenario_Computer::compute_grid_fast(
         }
         populations = {base_pop_index_};
         int tail_lineages[] = {total_lineages};
+        // A coalescence exactly at migration time belongs to the common tail.
+        // The last scenario may have left that node coloured ghost.
+        set_scenario(tree, 0);
         common += smart_llh(migration_time_, 0, populations, tail_lineages);
         return {common + sums[0], common + sums[1]};
     }

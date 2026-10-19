@@ -16,5 +16,5 @@ lib_deps = [tskit_dep]
 
 # Subprojects should compile in the static library for simplicity.
 treellh_inc = [tskit_inc, include_directories('.')]
-treellh = static_library('treellh', 'treellh.cpp', dependencies: lib_deps)
+treellh = static_library('treellh', ['treellh.cpp', 'likelihood_cache.cpp'], dependencies: lib_deps)
 treellh_dep = declare_dependency(link_with : treellh, include_directories: treellh_inc)

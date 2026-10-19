@@ -19,6 +19,10 @@ TS_arg
 TS_data
 
 arg_files
+docs
+benchmarks
+
+test_data
 
 single_pop.vcz
 single_split.vcz
