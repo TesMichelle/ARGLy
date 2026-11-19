@@ -1,5 +1,6 @@
 #include "treellh.h"
 
+#include <functional>
 #include <limits>
 #include <stdexcept>
 
@@ -752,6 +753,12 @@ DenseTensor3D Scenario_Computer::compute_grid_fast_impl(
         tsk_id_t sample_id, DenseTensor3D* ghost_result
     ) 
     {
+        if (migration_time.empty())
+            throw std::invalid_argument("migration time grid must be nonempty");
+        for (double time : migration_time)
+            if (!std::isfinite(time))
+                throw std::invalid_argument("migration time grid values must be finite");
+        std::sort(migration_time.begin(), migration_time.end(), std::greater<double>());
         if (N.empty())
         {
             N = {{N_[0]}, {N_[1]}, {N_[2]}};

@@ -20,6 +20,11 @@ size_t count(const std::string& s) {
     if(s.empty() || !std::all_of(s.begin(),s.end(),[](char c){return c>='0'&&c<='9';})) throw std::invalid_argument("expected a positive integer");
     size_t n=std::stoull(s);if(!n)throw std::invalid_argument("expected a positive integer");return n;
 }
+std::uint64_t seed(const std::string& s) {
+    if(s.empty() || !std::all_of(s.begin(),s.end(),[](char c){return c>='0'&&c<='9';}))
+        throw std::invalid_argument("expected an unsigned restart seed");
+    return std::stoull(s);
+}
 double rss() {rusage u{};getrusage(RUSAGE_SELF,&u);
 #ifdef __APPLE__
     return u.ru_maxrss/(1024.*1024.);
@@ -40,7 +45,9 @@ void help() {
         "  Above split1, Nbase remains fixed at params Nbase.\n"
         "--time-bounds LO,HI --prob-bounds LO,HI --N-bounds LO,HI\n"
         "  defaults: [0,split2) with outgroup, [0,split1) without; [0.000001,0.999999], [100,10000000]\n"
-        "--iterations K (30) --maxeval K (100 per migration search) --tolerance X (1e-5 absolute log likelihood)\n"
+        "--iterations K (30) --restarts K (10 random starts per migration search)\n"
+        "--maxeval K (100 per restart) --restart-seed K (5489; reproducible starts)\n"
+        "--tolerance X (1e-5 absolute log likelihood)\n"
         "--tree-num K: equally spaced genomic probes, deduplicated (default: all trees)\n"
         "--admixed-index I (0) --outgroup-index I (1)\n"
         "--cache-limit-mb X (1024 MiB, 0 unlimited); checked before allocating each tree\n"
@@ -76,7 +83,9 @@ int main(int argc,char** argv) {
             else if(arg=="--epoch-boundaries")epoch_boundaries=numbers(value());
             else if(arg=="--tree-num")tree_limit=count(value());
             else if(arg=="--iterations")options.iterations=count(value());
+            else if(arg=="--restarts")options.restarts=count(value());
             else if(arg=="--maxeval")options.max_evaluations=count(value());
+            else if(arg=="--restart-seed")options.restart_seed=seed(value());
             else if(arg=="--tolerance")options.tolerance=std::stod(value());
             else if(arg=="--admixed-index")admixed=std::stoi(value());
             else if(arg=="--outgroup-index")outgroup=std::stoi(value());
@@ -141,8 +150,10 @@ int main(int argc,char** argv) {
             for(double n:state.ghost_sizes)std::cerr<<n<<',';std::cerr<<'\n';
         };
         options.optimizer=[&](size_t it,size_t calls,double best){
-            if(calls==1 || calls%10==0 || calls==options.max_evaluations)
-                std::cerr<<"Migration search "<<it<<": "<<calls<<'/'<<options.max_evaluations<<" evaluations, best="<<best<<'\n';
+            const size_t budget=options.max_evaluations*options.restarts;
+            if(calls==1 || calls%10==0 || calls==budget)
+                std::cerr<<"Migration search "<<it<<": "<<calls<<'/'<<budget<<" evaluations across "
+                    <<options.restarts<<" restarts, best="<<best<<'\n';
         };
         epochfit::Parameters state{p[0],p[3],initial_sizes,initial_base};
         if(evaluate) options.iteration(0,ensemble.evaluate(state.time,state.probability),state,0);

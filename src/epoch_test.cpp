@@ -89,6 +89,8 @@ int main(){try{
         ensemble.set_sizes(base_sizes,sizes);
     }
     epochfit::FitOptions options;options.time_bounds={10,999};options.iterations=5;options.max_evaluations=30;
+    require(options.restarts==10,"wrong default ECME restart count");
+    options.restarts=2;
     double previous=-std::numeric_limits<double>::infinity();
     options.iteration=[&](size_t,double llh,const epochfit::Parameters&,double){require(llh>=previous-1e-8,"ECME decreased likelihood");previous=llh;};
     auto result=epochfit::fit(ensemble,{500,0.2,sizes},options);
@@ -100,6 +102,32 @@ int main(){try{
     auto fixed=epochfit::fit(ensemble,{500,0.2,sizes,base_sizes},options);
     require(fixed.parameters.ghost_sizes==sizes,"fixed ghost profile changed");
     close(fixed.log_likelihood,ensemble.evaluate(fixed.parameters.time,fixed.parameters.probability));
+    epochfit::FitOptions multi;
+    multi.time_bounds={10,999};multi.iterations=1;multi.max_evaluations=12;
+    multi.fit_ghost=false;multi.restart_seed=42;multi.restarts=1;
+    size_t calls=0;
+    multi.optimizer=[&](size_t,size_t n,double){calls=n;};
+    const auto one_start=epochfit::fit(ensemble,{500,0.2,sizes},multi);
+    const size_t one_calls=calls;
+    multi.restarts=10;calls=0;
+    const auto ten_starts=epochfit::fit(ensemble,{500,0.2,sizes},multi);
+    require(calls>one_calls,"extra ECME restarts did not run");
+    require(ten_starts.log_likelihood>=one_start.log_likelihood-1e-10,
+        "extra ECME restarts worsened the conditional maximum");
+    const auto repeated=epochfit::fit(ensemble,{500,0.2,sizes},multi);
+    close(repeated.log_likelihood,ten_starts.log_likelihood,1e-10);
+    close(repeated.parameters.time,ten_starts.parameters.time,1e-10);
+    close(repeated.parameters.probability,ten_starts.parameters.probability,1e-10);
+    multi.probability_bounds={0.2,0.2};multi.restarts=3;
+    const auto fixed_probability=epochfit::fit(ensemble,{500,0.2,sizes},multi);
+    close(fixed_probability.parameters.probability,0.2);
+    require(fixed_probability.parameters.time>=10 && fixed_probability.parameters.time<=999,
+        "random ECME time start left the bounds");
+    multi.restarts=0;
+    bool bad_restarts=false;
+    try{epochfit::fit(ensemble,{500,0.2,sizes},multi);}
+    catch(const std::invalid_argument&){bad_restarts=true;}
+    require(bad_restarts,"zero ECME restarts accepted");
     ensemble.set_sizes(sizes);
     bool rejected=false;try{epochfit::Ensemble limited(ts,p,pops,0,1,4,0,0.0001);}catch(const std::runtime_error&){rejected=true;}
     require(rejected,"memory limit ignored");

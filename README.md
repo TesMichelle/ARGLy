@@ -76,9 +76,10 @@ To evaluate a grid, add any `--grid-*` axis, for example:
   --output example.ratio-grid.tsv
 ```
 
-`--grid-time` runs from high to low; other grid axes can run in either
-direction. Each population-size axis has either one value or the same number
-of values as the other varying size axes. Missing axes use `--params`.
+`--grid-time` values may be supplied in any order; grid and ratio modes sort
+them from high to low before evaluation and output. Other grid axes retain
+their supplied order. Each population-size axis has either one value or the
+same number of values as the other varying size axes. Missing axes use `--params`.
 The fast grid pass shares node likelihood calculations across points and
 accumulates base and ghost scenarios separately in log space.
 

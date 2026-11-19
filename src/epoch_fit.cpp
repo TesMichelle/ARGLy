@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <stdexcept>
 namespace epochfit {
 FitResult fit(Ensemble& ensemble, Parameters p, const FitOptions& options) {
-    if(!options.iterations || !options.max_evaluations || options.max_evaluations>2147483647
+    if(!options.iterations || !options.max_evaluations || !options.restarts
+        || options.max_evaluations>2147483647
+        || options.restarts>std::numeric_limits<size_t>::max()/options.max_evaluations
         || !(options.min_size>0 && options.max_size>=options.min_size)
         || !std::isfinite(options.max_size) || !(options.tolerance>0)
         || !std::isfinite(options.tolerance)) throw std::invalid_argument("invalid ECME options");
@@ -22,6 +25,8 @@ FitResult fit(Ensemble& ensemble, Parameters p, const FitOptions& options) {
     auto apply_sizes=[&]{if(p.base_sizes.empty()) ensemble.set_sizes(p.ghost_sizes);
         else ensemble.set_sizes(p.base_sizes,p.ghost_sizes);};
     apply_sizes();
+    std::mt19937_64 rng(options.restart_seed);
+    std::uniform_real_distribution<double> uniform(0.0,1.0);
     double current=ensemble.evaluate(p.time,p.probability);
     if(!std::isfinite(current)) throw std::runtime_error("nonfinite starting likelihood");
     if(options.iteration) options.iteration(0,current,p,0);
@@ -62,27 +67,30 @@ FitResult fit(Ensemble& ensemble, Parameters p, const FitOptions& options) {
                 return std::isfinite(value)?value:-1e300;
             }
         } context{ensemble,options,it,0,{tb[0],pb[0]},{tb[1],pb[1]}, {p.time,p.probability},{},current};
-        std::vector<double> x;
+        std::vector<double> initial_step;
+        double min_epoch=std::numeric_limits<double>::infinity();
+        const auto& boundaries=ensemble.boundaries();
+        for(size_t e=1;e<boundaries.size();++e)
+            min_epoch=std::min(min_epoch,boundaries[e]-boundaries[e-1]);
         for(size_t i=0;i<2;++i) if(context.hi[i]>context.lo[i]) {
-            context.active.push_back(i);x.push_back((context.point[i]-context.lo[i])/(context.hi[i]-context.lo[i]));
+            context.active.push_back(i);
+            const double natural=i==0?min_epoch/4:0.01;
+            initial_step.push_back(std::clamp(natural/(context.hi[i]-context.lo[i]),1e-5,0.05));
         }
-        if(!x.empty()) {
-            nlopt::opt optimizer(x.size()==1?nlopt::LN_NELDERMEAD:nlopt::LN_BOBYQA,x.size());
-            optimizer.set_lower_bounds(0.);optimizer.set_upper_bounds(1.);
-            optimizer.set_max_objective(Context::objective,&context);
-            optimizer.set_maxeval(options.max_evaluations);optimizer.set_xtol_abs(1e-6);
-            double min_epoch=std::numeric_limits<double>::infinity();
-            const auto& boundaries=ensemble.boundaries();
-            for(size_t e=1;e<boundaries.size();++e)
-                min_epoch=std::min(min_epoch,boundaries[e]-boundaries[e-1]);
-            std::vector<double> initial_step;
-            for(size_t i:context.active) {
-                const double natural=i==0?min_epoch/4:0.01;
-                initial_step.push_back(std::clamp(natural/(context.hi[i]-context.lo[i]),1e-5,0.05));
+        if(!context.active.empty()) {
+            for(size_t restart=0;restart<options.restarts;++restart) {
+                std::vector<double> x;
+                x.reserve(context.active.size());
+                for(size_t j=0;j<context.active.size();++j) x.push_back(uniform(rng));
+                nlopt::opt optimizer(x.size()==1?nlopt::LN_NELDERMEAD:nlopt::LN_BOBYQA,x.size());
+                optimizer.set_lower_bounds(0.);optimizer.set_upper_bounds(1.);
+                optimizer.set_max_objective(Context::objective,&context);
+                optimizer.set_maxeval(options.max_evaluations);optimizer.set_xtol_abs(1e-6);
+                optimizer.set_initial_step(initial_step);
+                double optimum=current;
+                try {optimizer.optimize(x,optimum);}
+                catch(const nlopt::roundoff_limited&) { /* Keep the best evaluated point. */ }
             }
-            optimizer.set_initial_step(initial_step);
-            double optimum=current;
-            try {optimizer.optimize(x,optimum);} catch(const nlopt::roundoff_limited&) { /* Use the best evaluated point. */ }
         }
         p.time=context.point[0];p.probability=context.point[1];current=context.best;
         if(!std::isfinite(current) || current<old-1e-8*(1+std::abs(old)))

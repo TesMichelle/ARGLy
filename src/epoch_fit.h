@@ -1,9 +1,11 @@
 #pragma once
 #include "epoch_model.h"
+#include <cstdint>
 #include <string>
 namespace epochfit {
 struct FitOptions {
-    size_t iterations=30, max_evaluations=100;
+    size_t iterations=30, max_evaluations=100, restarts=10;
+    std::uint64_t restart_seed=5489;
     double min_size=100, max_size=1e7, tolerance=1e-5;
     bool fit_ghost=true;
     std::array<double,2> time_bounds{}, probability_bounds{1e-6,1-1e-6};

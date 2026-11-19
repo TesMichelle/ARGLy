@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -125,7 +126,7 @@ void print_usage(const char *program)
         << "  --sample-id tskit node ID of the sample to classify (ratio mode)\n"
         << "  ratio output: one TSV row per tree; with grid options, one row per tree and grid point\n"
         << "  log_ratio = log_base - log_ghost; log_base/log_ghost are log likelihoods\n"
-        << "  --grid-time and --grid-prob accept either a,b,n or comma-separated values\n"
+        << "  --grid-time and --grid-prob accept either a,b,n or comma-separated values; times are sorted high to low\n"
         << "  --grid-N-base, --grid-N-ghost and --grid-N-outgroup add an N grid axis\n"
         << "  --tree-num K: fit/cached sample K evenly spaced genomic positions (unique trees); grid samples approximately K along the sequence\n"
         << "  --text-output writes grid as whitespace text instead of raw doubles\n";
@@ -342,6 +343,12 @@ Config parse_args(int argc, char **argv)
     if (cfg.sample_population.empty()) {
         throw std::runtime_error("--sample-population is required");
     }
+    if (cfg.mode == "grid" || (cfg.mode == "ratio" && cfg.grid_requested)) {
+        for (double time : cfg.grid_time)
+            if (!std::isfinite(time))
+                throw std::runtime_error("--grid-time values must be finite");
+        std::sort(cfg.grid_time.begin(), cfg.grid_time.end(), std::greater<double>());
+    }
     if (cfg.mode == "ratio" && cfg.sample_id == TSK_NULL) {
         throw std::runtime_error("--sample-id is required in ratio mode");
     }
@@ -350,11 +357,9 @@ Config parse_args(int argc, char **argv)
         if (!cfg.grid_prob_specified) cfg.grid_prob = {cfg.parameters[3]};
         if (cfg.grid_time.empty() || cfg.grid_prob.empty())
             throw std::runtime_error("ratio grid axes must be nonempty");
-        for (size_t i = 0; i < cfg.grid_time.size(); ++i)
-            if (!std::isfinite(cfg.grid_time[i]) || cfg.grid_time[i] < 0
-                || cfg.grid_time[i] >= cfg.parameters[1]
-                || (i && cfg.grid_time[i] > cfg.grid_time[i - 1]))
-                throw std::runtime_error("ratio --grid-time must descend and stay in [0, split2)");
+        for (double time : cfg.grid_time)
+            if (time < 0 || time >= cfg.parameters[1])
+                throw std::runtime_error("ratio --grid-time must stay in [0, split2)");
         for (double p : cfg.grid_prob)
             if (!std::isfinite(p) || p < 0 || p > 1)
                 throw std::runtime_error("ratio --grid-prob must be in [0,1]");

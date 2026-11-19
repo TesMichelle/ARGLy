@@ -117,12 +117,19 @@ int main() {
             const std::vector<double> probabilities = {0,0.2,1};
             const std::vector<std::vector<double>> sizes = {{10000,20000},{12000,24000},{9000}};
             const auto all_grid = direct.compute_grid_fast(tree, times, probabilities, sizes);
+            const auto ascending_grid = direct.compute_grid_fast(
+                tree, {250,501,900}, probabilities, sizes);
             for (tsk_id_t sample : {tsk_id_t{0}, tsk_id_t{2}}) {
                 auto [base, ghost] = direct.compute_grid_ratio_fast(
                     tree, times, probabilities, sizes, sample);
+                auto [ascending_base, ascending_ghost] = direct.compute_grid_ratio_fast(
+                    tree, {250,501,900}, probabilities, sizes, sample);
                 for (size_t t = 0; t < times.size(); ++t)
                     for (size_t n = 0; n < 2; ++n)
                         for (size_t q = 0; q < probabilities.size(); ++q) {
+                            close(ascending_grid(t,n,q), all_grid(t,n,q));
+                            close(ascending_base(t,n,q), base(t,n,q));
+                            close(ascending_ghost(t,n,q), ghost(t,n,q));
                             reference[0] = times[t]; reference[3] = probabilities[q];
                             reference[6] = sizes[0][n]; reference[7] = sizes[1][n];
                             const auto scalar = direct.compute_llh_ratio(tree, reference, sample);

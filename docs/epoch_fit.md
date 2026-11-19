@@ -20,7 +20,7 @@ Meson builds the executable too; `meson test -C builddir` runs the new tests.
   --params 500,1000,2000,0.2,0.5,0.5,10000,12000,9000 \
   --epochs 5 --tree-num 1000 \
   --time-bounds 100,900 --prob-bounds 0.001,0.999 \
-  --N-bounds 100,1000000 --iterations 30 --maxeval 100 \
+  --N-bounds 100,1000000 --iterations 30 --restarts 20 --maxeval 100 \
   --output epoch-fit.tsv
 ```
 
@@ -124,14 +124,23 @@ After rebuilding the second cache level, NLopt searches time and probability to
 increase the **observed** full-tree likelihood with both N profiles fixed. Because this
 step optimizes observed likelihood rather than the EM auxiliary function, the
 algorithm is ECME. BOBYQA uses normalized coordinates; when just one migration
-parameter is free, Nelder–Mead is used. The best evaluated point is retained,
-including the starting point. A material decrease in likelihood raises an error;
-tiny roundoff decreases roll back the iteration. `--maxeval` is per migration
-search, and `--iterations` limits outer iterations. Convergence uses absolute
-log-likelihood improvement (`--tolerance`, default 1e-5).
+parameter is free, Nelder–Mead is used. Each ECME iteration runs 10 local searches
+by default. `--restarts K` changes the number of searches (for example,
+`--restarts 20`). Each search starts at an independent pseudorandom point sampled
+uniformly within the supplied time and probability bounds; fixed coordinates
+remain fixed. The sequence is reproducible with the default `--restart-seed 5489`;
+change that seed to draw different starts. The current ECME point is also retained
+as a candidate, without consuming one of the random searches. All searches share
+the same tree and prefix caches and the same fixed N curves; the best evaluated
+point is selected. A material decrease in likelihood raises an error; tiny
+roundoff decreases roll back the iteration. `--maxeval` is **per restart**, so the
+default search budget is up to 10 × 100 evaluations per ECME iteration.
+`--iterations` limits outer iterations. Convergence uses absolute log-likelihood
+improvement (`--tolerance`, default 1e-5).
 
-This is a local method. Repeat with different starting curves and migration
-parameters to compare optima. There is no smoothing penalty; many short epochs
+This is still a local method. The restarts improve the conditional search over
+time and probability at fixed N, but do not replace full ECME runs with different
+starting N curves and migration parameters. There is no smoothing penalty; many short epochs
 can yield weakly identified or boundary estimates. Local trees from one ARG are
 correlated: the summed score follows existing behaviour and does not provide
 independent-tree uncertainty estimates.
