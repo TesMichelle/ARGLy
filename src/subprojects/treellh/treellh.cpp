@@ -535,21 +535,17 @@ namespace treellh
                 if (current_node[pop_i].time == -1)
                 {
                     // llh without coal
-                    llh += (
-                        -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2.
-                        * (time_start - next_node.time)
-                    );
+                    llh -= lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2.
+                        * integrated_inverse_2N(populations[pop_i], time_start, next_node.time);
                 }
                 else
                 {
                     // llh with coal 
                     if (lineages_num[pop_i] > 1)
                     {
-                        llh += std::log(1 / N_[pop_i] / 2.);
-                        llh += (
-                            -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2.
-                            * (current_node[pop_i].time - next_node.time)
-                        );
+                        llh += std::log(inverse_2N_at(populations[pop_i], current_node[pop_i].time));
+                        llh -= lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2.
+                            * integrated_inverse_2N(populations[pop_i], current_node[pop_i].time, next_node.time);
                     } 
                 }
                 current_node[pop_i] = next_node;
@@ -565,18 +561,14 @@ namespace treellh
             {
                 if (current_node[pop_i].time == -1)
                 {
-                    llh += (
-                        -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2. 
-                        * (time_start - time_end)
-                    );  
+                    llh -= lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2.
+                        * integrated_inverse_2N(populations[pop_i], time_start, time_end);
                 }
                 else
                 {
-                    llh += std::log(1 / N_[pop_i] / 2.); // exact pair, earlier: (lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2.)
-                    llh += (
-                        -lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2. / N_[pop_i] / 2.
-                        * (current_node[pop_i].time - time_end)
-                    );   
+                    llh += std::log(inverse_2N_at(populations[pop_i], current_node[pop_i].time));
+                    llh -= lineages_num[pop_i] * (lineages_num[pop_i] - 1) / 2.
+                        * integrated_inverse_2N(populations[pop_i], current_node[pop_i].time, time_end);
                 }
             }
         }
@@ -1398,8 +1390,72 @@ DenseTensor3D Scenario_Computer::compute_grid_fast_impl(
         return {common + sums[0], common + sums[1]};
     }
 
+    void Scenario_Computer::set_population_profiles(
+        PopulationSizeProfile base, PopulationSizeProfile ghost)
+    {
+        if (!std::isfinite(N_[base_pop_index_]) || !(N_[base_pop_index_] > 0)
+            || !std::isfinite(N_[ghost_pop_index_]) || !(N_[ghost_pop_index_] > 0))
+            throw std::invalid_argument("population profiles require positive baseline N values");
+        auto validate = [this](const PopulationSizeProfile& profile) {
+            if (profile.boundaries.empty() && profile.sizes.empty()) return;
+            if (profile.boundaries.size() != profile.sizes.size() + 1
+                || profile.sizes.empty() || profile.boundaries.front() != 0
+                || profile.boundaries.back() != split_1_time_)
+                throw std::invalid_argument("population profile needs K sizes and K+1 boundaries from 0 to split1");
+            for (size_t i = 1; i < profile.boundaries.size(); ++i)
+                if (!std::isfinite(profile.boundaries[i])
+                    || !(profile.boundaries[i] > profile.boundaries[i-1]))
+                    throw std::invalid_argument("population profile boundaries must increase strictly");
+            for (double size : profile.sizes)
+                if (!std::isfinite(size) || !(size > 0))
+                    throw std::invalid_argument("population profile sizes must be positive and finite");
+        };
+        validate(base);validate(ghost);
+        base_profile_ = std::move(base);
+        ghost_profile_ = std::move(ghost);
+    }
+
+    double Scenario_Computer::inverse_2N_at(int population, double time) const
+    {
+        const auto& profile = population == base_pop_index_ ? base_profile_ : ghost_profile_;
+        if (population == outgroup_pop_index_ || profile.sizes.empty() || time > split_1_time_)
+            return 0.5 / N_[population];
+        const auto found = std::lower_bound(
+            profile.boundaries.begin()+1, profile.boundaries.end(), time);
+        const size_t epoch = static_cast<size_t>(found-profile.boundaries.begin()-1);
+        return 0.5 / profile.sizes[epoch];
+    }
+
+    double Scenario_Computer::integrated_inverse_2N(
+        int population, double upper, double lower) const
+    {
+        if (!(upper >= lower)) throw std::invalid_argument("reversed likelihood time interval");
+        const auto& profile = population == base_pop_index_ ? base_profile_ : ghost_profile_;
+        if (population == outgroup_pop_index_ || profile.sizes.empty())
+            return (upper-lower) * (0.5/N_[population]);
+        double result = 0;
+        while (upper > lower) {
+            if (upper > split_1_time_) {
+                const double cut = std::max(lower, split_1_time_);
+                result += (upper-cut) * (0.5/N_[population]);
+                upper = cut;
+            } else {
+                const auto found = std::lower_bound(
+                    profile.boundaries.begin()+1, profile.boundaries.end(), upper);
+                const size_t epoch = static_cast<size_t>(found-profile.boundaries.begin()-1);
+                const double cut = std::max(lower, profile.boundaries[epoch]);
+                result += (upper-cut) * (0.5/profile.sizes[epoch]);
+                upper = cut;
+            }
+        }
+        return result;
+    }
+
     void Scenario_Computer::set_parameters(std::span<const double> parameters)
     {
+        if ((!base_profile_.sizes.empty() && parameters[2] != base_profile_.boundaries.back())
+            || (!ghost_profile_.sizes.empty() && parameters[2] != ghost_profile_.boundaries.back()))
+            throw std::invalid_argument("profile split1 differs from query split1");
         migration_time_ = parameters[0];
         split_2_time_ = parameters[1];
         split_1_time_ = parameters[2];

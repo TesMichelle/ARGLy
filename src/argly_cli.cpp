@@ -51,6 +51,10 @@ struct Config {
     bool grid_prob_specified = false;
     bool grid_requested = false;
     std::vector<std::vector<double>> grid_N;
+    treellh::PopulationSizeProfile base_profile, ghost_profile;
+    bool base_boundaries_given = false, base_sizes_given = false;
+    bool ghost_boundaries_given = false, ghost_sizes_given = false;
+    bool grid_N_specified = false;
     int admixed_index = 0;
     int outgroup_index = 1;
     size_t sim_count = 0;
@@ -114,6 +118,7 @@ void print_usage(const char *program)
         << "Usage:\n"
         << "  " << program << " --mode llh  --input FILE --sample-population LIST --params LIST [--output FILE]\n"
         << "  " << program << " --mode ratio --input FILE --sample-population LIST --params LIST --sample-id ID [--output FILE]\n"
+        << "  " << program << " --mode ratio --input FILE --sample-population LIST --params LIST --sample-id ID --base-boundaries CSV --base-sizes CSV [--ghost-boundaries CSV --ghost-sizes CSV]\n"
         << "  " << program << " --mode ratio --input FILE --sample-population LIST --params LIST --sample-id ID --grid-time SPEC --grid-prob SPEC [--grid-N-* SPEC] [--output FILE]\n"
         << "  " << program << " --mode cached --input FILE --sample-population LIST --params LIST [--queries FILE|-] [--estimate-only] [--output FILE]\n"
         << "  " << program << " --mode grid --input FILE --sample-population LIST --params LIST --grid-time SPEC --grid-prob SPEC --output FILE\n"
@@ -128,6 +133,9 @@ void print_usage(const char *program)
         << "  log_ratio = log_base - log_ghost; log_base/log_ghost are log likelihoods\n"
         << "  --grid-time and --grid-prob accept either a,b,n or comma-separated values; times are sorted high to low\n"
         << "  --grid-N-base, --grid-N-ghost and --grid-N-outgroup add an N grid axis\n"
+        << "  ratio: --base-boundaries/--base-sizes and --ghost-boundaries/--ghost-sizes set N(t) profiles\n"
+        << "  profile boundaries run from 0 to split1; sizes correspond to (left,right] epochs\n"
+        << "  ratio profiles support --grid-time/--grid-prob, but not --grid-N-*\n"
         << "  --tree-num K: fit/cached sample K evenly spaced genomic positions (unique trees); grid samples approximately K along the sequence\n"
         << "  --text-output writes grid as whitespace text instead of raw doubles\n";
     std::cerr
@@ -166,6 +174,24 @@ std::vector<double> parse_doubles(const std::string &value)
     std::vector<double> result;
     for (const auto &item : split(value, ',')) {
         result.push_back(std::stod(item));
+    }
+    return result;
+}
+
+std::vector<double> parse_profile_list(const std::string& value)
+{
+    if (value.empty() || value.back() == ',')
+        throw std::runtime_error("profile list must contain finite numbers");
+    std::vector<double> result;
+    std::stringstream stream(value);
+    std::string item;
+    while (std::getline(stream, item, ',')) {
+        size_t consumed = 0;
+        if (item.empty()) throw std::runtime_error("empty value in profile list");
+        const double number = std::stod(item, &consumed);
+        if (consumed != item.size() || !std::isfinite(number))
+            throw std::runtime_error("profile list must contain finite numbers");
+        result.push_back(number);
     }
     return result;
 }
@@ -247,6 +273,18 @@ Config parse_args(int argc, char **argv)
                 throw std::runtime_error("--sample-id must be a nonnegative node ID");
             }
             cfg.sample_id = static_cast<tsk_id_t>(id);
+        } else if (arg == "--base-boundaries") {
+            cfg.base_profile.boundaries = parse_profile_list(require_value(i, argc, argv));
+            cfg.base_boundaries_given = true;
+        } else if (arg == "--base-sizes") {
+            cfg.base_profile.sizes = parse_profile_list(require_value(i, argc, argv));
+            cfg.base_sizes_given = true;
+        } else if (arg == "--ghost-boundaries") {
+            cfg.ghost_profile.boundaries = parse_profile_list(require_value(i, argc, argv));
+            cfg.ghost_boundaries_given = true;
+        } else if (arg == "--ghost-sizes") {
+            cfg.ghost_profile.sizes = parse_profile_list(require_value(i, argc, argv));
+            cfg.ghost_sizes_given = true;
         } else if (arg == "--queries") {
             cfg.queries = require_value(i, argc, argv);
         } else if (arg == "--estimate-only") {
@@ -276,19 +314,19 @@ Config parse_args(int argc, char **argv)
             cfg.grid_prob = parse_grid_spec(require_value(i, argc, argv));
             cfg.grid_prob_specified = cfg.grid_requested = true;
         } else if (arg == "--grid-N-base") {
-            cfg.grid_requested = true;
+            cfg.grid_requested = cfg.grid_N_specified = true;
             if (cfg.grid_N.empty()) {
                 cfg.grid_N = {{}, {}, {}};
             }
             cfg.grid_N[0] = parse_grid_spec(require_value(i, argc, argv));
         } else if (arg == "--grid-N-ghost") {
-            cfg.grid_requested = true;
+            cfg.grid_requested = cfg.grid_N_specified = true;
             if (cfg.grid_N.empty()) {
                 cfg.grid_N = {{}, {}, {}};
             }
             cfg.grid_N[1] = parse_grid_spec(require_value(i, argc, argv));
         } else if (arg == "--grid-N-outgroup") {
-            cfg.grid_requested = true;
+            cfg.grid_requested = cfg.grid_N_specified = true;
             if (cfg.grid_N.empty()) {
                 cfg.grid_N = {{}, {}, {}};
             }
@@ -351,6 +389,17 @@ Config parse_args(int argc, char **argv)
     }
     if (cfg.mode == "ratio" && cfg.sample_id == TSK_NULL) {
         throw std::runtime_error("--sample-id is required in ratio mode");
+    }
+    const bool profiles = cfg.base_boundaries_given || cfg.base_sizes_given
+        || cfg.ghost_boundaries_given || cfg.ghost_sizes_given;
+    if (profiles) {
+        if (cfg.mode != "ratio")
+            throw std::runtime_error("population profiles currently require --mode ratio");
+        if (cfg.base_boundaries_given != cfg.base_sizes_given
+            || cfg.ghost_boundaries_given != cfg.ghost_sizes_given)
+            throw std::runtime_error("each ratio profile needs both boundaries and sizes");
+        if (cfg.grid_N_specified)
+            throw std::runtime_error("ratio profiles cannot be combined with --grid-N-*");
     }
     if (cfg.mode == "ratio" && cfg.grid_requested) {
         if (!cfg.grid_time_specified) cfg.grid_time = {cfg.parameters[0]};
@@ -561,11 +610,16 @@ void compute_ratio_file(const Config &cfg, const std::string &input, std::ostrea
 
     treellh::Scenario_Computer computer(
         ts, cfg.parameters, cfg.sample_population, cfg.admixed_index, cfg.outgroup_index);
+    const bool profiles = !cfg.base_profile.sizes.empty() || !cfg.ghost_profile.sizes.empty();
+    if (profiles) computer.set_population_profiles(cfg.base_profile, cfg.ghost_profile);
     tsk_tree_t tree;
     int ret = tsk_tree_init(&tree, &ts, 0);
     check_tsk_error(ret);
 
-    if (cfg.grid_requested)
+    if (cfg.grid_requested && profiles)
+        out << "tree_index\tleft\tright\ttime_index\tprob_index"
+            << "\tmigration_time\tmigration_prob\tlog_base\tlog_ghost\tlog_ratio\n";
+    else if (cfg.grid_requested)
         out << "tree_index\tleft\tright\ttime_index\tN_index\tprob_index"
             << "\tmigration_time\tNbase\tNghost\tNoutgroup\tmigration_prob"
             << "\tlog_base\tlog_ghost\tlog_ratio\n";
@@ -577,6 +631,25 @@ void compute_ratio_file(const Config &cfg, const std::string &input, std::ostrea
     for (const auto& axis : cfg.grid_N) n_grid_size = std::max(n_grid_size, axis.size());
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK; ret = tsk_tree_next(&tree)) {
         if (cfg.grid_requested) {
+            if (profiles) {
+                for (size_t t = 0; t < cfg.grid_time.size(); ++t)
+                    for (size_t q = 0; q < cfg.grid_prob.size(); ++q) {
+                        auto parameters = cfg.parameters;
+                        parameters[0] = cfg.grid_time[t];
+                        parameters[3] = cfg.grid_prob[q];
+                        const auto [log_base, log_ghost] = computer.compute_llh_ratio(
+                            tree, parameters, cfg.sample_id);
+                        const double log_ratio = std::isinf(log_base) && log_base < 0
+                            && std::isinf(log_ghost) && log_ghost < 0
+                            ? std::numeric_limits<double>::quiet_NaN() : log_base-log_ghost;
+                        out << tree_index << '\t' << tree.interval.left << '\t' << tree.interval.right
+                            << '\t' << t << '\t' << q << '\t' << cfg.grid_time[t]
+                            << '\t' << cfg.grid_prob[q] << '\t' << log_base << '\t'
+                            << log_ghost << '\t' << log_ratio << '\n';
+                    }
+                ++tree_index;
+                continue;
+            }
             auto [base, ghost] = computer.compute_grid_ratio_fast(
                 tree, cfg.grid_time, cfg.grid_prob, cfg.grid_N, cfg.sample_id);
             for (size_t t = 0; t < cfg.grid_time.size(); ++t)

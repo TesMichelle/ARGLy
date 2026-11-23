@@ -128,6 +128,156 @@ int main(){try{
     try{epochfit::fit(ensemble,{500,0.2,sizes},multi);}
     catch(const std::invalid_argument&){bad_restarts=true;}
     require(bad_restarts,"zero ECME restarts accepted");
+    const auto balanced=epochfit::balanced_epoch_boundaries(
+        {{100,1},{200,1},{300,1},{400,1}},2,500);
+    require(balanced==std::vector<double>({0,250,500}),
+        "balanced epoch boundary did not fall between coalescences");
+    bool too_many_epochs=false;
+    try{epochfit::balanced_epoch_boundaries({{100,2},{200,2}},3,500);}
+    catch(const std::invalid_argument&){too_many_epochs=true;}
+    require(too_many_epochs,"balanced grid split tied coalescence times");
+    epochfit::Ensemble boundary_case(ts,p,pops,0,1,2,0,0,{},
+        {0,700,2000},2,{0,300,2000});
+    const auto boundary_expected=boundary_case.expectation(500,0.2);
+    const auto boundary_masses=boundary_case.coalescence_masses(500,0.2);
+    double low_base=0,low_ghost=0;
+    for(const auto& [time,mass]:boundary_masses[0])if(time<=300)low_base+=mass;
+    for(const auto& [time,mass]:boundary_masses[1])if(time<=700)low_ghost+=mass;
+    close(boundary_expected.base_coalescences[0],low_base);
+    close(boundary_expected.coalescences[0],low_ghost);
+    const auto raw_counts=epochfit::raw_coalescence_counts(ts,2000);
+    double raw_total=0;
+    for(const auto& [time,count]:raw_counts)raw_total+=count;
+    close(raw_total,11);
+    close(raw_counts.front().first,300);
+    close(raw_counts[1].second,3); // Three simultaneous outgroup coalescences.
+    const auto raw_information=epochfit::raw_epoch_statistics(
+        ts,{0,600,2000},{0,400,1000,2000});
+    close(raw_information[1][0].coalescences,6); // Events at 400 belong below it.
+    close(raw_information[1][0].lineage_time,6900); // 3 × (6 × 300 + 5 × 100).
+    close(raw_information[1][0].pair_time,16500); // 3 × (15 × 300 + 10 × 100).
+    close(raw_information[0][0].coalescences,6);
+    close(raw_information[0][0].lineage_time,9300);
+    close(raw_information[0][0].pair_time,20100);
+    double through_700=0;
+    for(const auto& [time,count]:epochfit::raw_coalescence_counts(ts,700))through_700+=count;
+    close(through_700,9); // Events at the upper split boundary are included.
+    const auto window_counts=epochfit::coalescences_per_epoch(
+        {{100,1},{200,2},{300,3}}, {0,200,400});
+    require(window_counts==std::vector<double>({3,3}),
+        "coalescence on an epoch boundary was not assigned to the younger epoch");
+    epochfit::Ensemble two_grids(ts,p,pops,0,1,3,0,0,{},
+        {0,400,1000,2000},2,{0,600,2000});
+    const std::vector<double> separate_base={7000,11000};
+    const std::vector<double> separate_ghost={5000,9000,13000};
+    two_grids.set_sizes({10000,10000},{12000,12000,12000});
+    p[6]=10000;p[7]=12000;p[3]=0.2;
+    for(double time:{300.,400.,500.,600.,701.}) {
+        p[0]=time;
+        close(two_grids.evaluate(time,0.2),legacy.evaluate(p));
+    }
+    two_grids.set_sizes(separate_base,separate_ghost);
+    {
+        const auto expected=two_grids.expectation(500,0.3);
+        const auto kernel=two_grids.kernel_profile(500,0.3,1e6,5);
+        auto totals=[](const std::vector<double>& values){
+            double sum=0;for(double value:values)sum+=value;return sum;
+        };
+        const auto near=[](double actual,double target){
+            return std::abs(actual-target)<=1e-5*std::max(1.,std::abs(target));
+        };
+        require(kernel[0].size()==5 && kernel[1].size()==5,
+            "kernel profile omitted a requested time point");
+        require(near(kernel[0][2].coalescences,totals(expected.base_coalescences))
+            && near(kernel[0][2].exposure,totals(expected.base_exposure)),
+            "kernel base statistics do not recover E-step totals for a wide kernel");
+        require(near(kernel[1][2].coalescences,totals(expected.coalescences))
+            && near(kernel[1][2].exposure,totals(expected.exposure)),
+            "kernel ghost statistics do not recover E-step totals for a wide kernel");
+        require(std::isnan(kernel[1][0].size) && kernel[1][0].coalescences==0,
+            "ghost kernel profile was extrapolated below migration");
+    }
+    for(double time:{350.,500.,650.,850.})for(double probability:{0.1,0.3,0.8}) {
+        const auto analytic=two_grids.derivatives(time,probability);
+        close(analytic.log_likelihood,two_grids.evaluate(time,probability));
+        const double dt=0.001,dp=1e-5;
+        close(analytic.time,
+            (two_grids.evaluate(time+dt,probability)-two_grids.evaluate(time-dt,probability))/(2*dt),1e-7);
+        close(analytic.probability,
+            (two_grids.evaluate(time,probability+dp)-two_grids.evaluate(time,probability-dp))/(2*dp),1e-6);
+        double tree_llh=0,tree_dt=0,tree_dp=0;
+        for(const auto& tree:two_grids.derivatives_by_tree(time,probability)) {
+            tree_llh+=tree.log_likelihood;tree_dt+=tree.time;tree_dp+=tree.probability;
+        }
+        close(tree_llh,analytic.log_likelihood);close(tree_dt,analytic.time);close(tree_dp,analytic.probability);
+    }
+    bool derivative_boundary_rejected=false;
+    try{two_grids.derivatives(400,0.3);}catch(const std::invalid_argument&){derivative_boundary_rejected=true;}
+    require(derivative_boundary_rejected,"time derivative reported at a cache boundary");
+    bool derivative_endpoint_rejected=false;
+    try{two_grids.derivatives(500,0);}catch(const std::invalid_argument&){derivative_endpoint_rejected=true;}
+    require(derivative_endpoint_rejected,"probability derivative reported at an endpoint");
+    treellh::Scenario_Computer profiled_ratio(ts,p,pops,0,1);
+    profiled_ratio.set_population_profiles(
+        {{0,600,2000},separate_base},
+        {{0,400,1000,2000},separate_ghost});
+    tsk_tree_t ratio_tree{};check(tsk_tree_init(&ratio_tree,&ts,0));
+    for(double time:{0.,300.,400.,500.,600.,700.,999.})
+        for(double probability:{0.,0.2,1.}) {
+            p[0]=time;p[3]=probability;
+            double sum=0;
+            int next;
+            for(next=tsk_tree_first(&ratio_tree);next==TSK_TREE_OK;next=tsk_tree_next(&ratio_tree)) {
+                const auto [base,ghost]=profiled_ratio.compute_llh_ratio(ratio_tree,p,0);
+                const double total=base==-std::numeric_limits<double>::infinity()?ghost
+                    :ghost==-std::numeric_limits<double>::infinity()?base
+                    :std::max(base,ghost)+std::log1p(std::exp(-std::abs(base-ghost)));
+                sum+=total;
+            }
+            check(next);
+            close(sum,two_grids.evaluate(time,probability),1e-7);
+        }
+    tsk_tree_free(&ratio_tree);
+    require(two_grids.base_boundaries().size()==3 && two_grids.boundaries().size()==4,
+        "population epoch grids were merged");
+    for(double time:{300.,400.,500.,600.,701.}) {
+        const auto expected=two_grids.expectation(time,0.2);
+        const auto masses=two_grids.coalescence_masses(time,0.2);
+        double total_base=0,total_ghost=0;
+        for(const auto& [event,weight]:masses[0])total_base+=weight;
+        for(const auto& [event,weight]:masses[1])total_ghost+=weight;
+        double count_base=0,count_ghost=0;
+        for(double count:expected.base_coalescences)count_base+=count;
+        for(double count:expected.coalescences)count_ghost+=count;
+        close(total_base,count_base);close(total_ghost,count_ghost);
+        for(size_t e=0;e<separate_base.size();++e) {
+            auto perturbed=separate_base;const double eps=1e-5;
+            perturbed[e]*=std::exp(eps);two_grids.set_sizes(perturbed,separate_ghost);
+            const double plus=two_grids.evaluate(time,0.2);
+            perturbed[e]=separate_base[e]*std::exp(-eps);two_grids.set_sizes(perturbed,separate_ghost);
+            const double minus=two_grids.evaluate(time,0.2);
+            close((plus-minus)/(2*eps),expected.base_exposure[e]/(2*separate_base[e])-expected.base_coalescences[e],1e-7);
+        }
+        for(size_t e=0;e<separate_ghost.size();++e) {
+            auto perturbed=separate_ghost;const double eps=1e-5;
+            perturbed[e]*=std::exp(eps);two_grids.set_sizes(separate_base,perturbed);
+            const double plus=two_grids.evaluate(time,0.2);
+            perturbed[e]=separate_ghost[e]*std::exp(-eps);two_grids.set_sizes(separate_base,perturbed);
+            const double minus=two_grids.evaluate(time,0.2);
+            close((plus-minus)/(2*eps),expected.exposure[e]/(2*separate_ghost[e])-expected.coalescences[e],1e-7);
+        }
+        two_grids.set_sizes(separate_base,separate_ghost);
+    }
+    epochfit::FitOptions two_grid_fit;
+    two_grid_fit.time_bounds={10,999};two_grid_fit.iterations=2;
+    two_grid_fit.max_evaluations=12;two_grid_fit.restarts=2;
+    const double two_grid_initial=two_grids.evaluate(500,0.2);
+    const auto two_grid_result=epochfit::fit(two_grids,
+        {500,0.2,separate_ghost,separate_base},two_grid_fit);
+    require(two_grid_result.parameters.base_sizes.size()==2
+        && two_grid_result.parameters.ghost_sizes.size()==3
+        && two_grid_result.log_likelihood>=two_grid_initial-1e-8,
+        "two-grid ECME changed dimensions or decreased likelihood");
     ensemble.set_sizes(sizes);
     bool rejected=false;try{epochfit::Ensemble limited(ts,p,pops,0,1,4,0,0.0001);}catch(const std::runtime_error&){rejected=true;}
     require(rejected,"memory limit ignored");

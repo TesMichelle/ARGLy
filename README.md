@@ -65,6 +65,32 @@ first split time, migration probability, second split proportion, first split
 proportion, and the base, ghost, and outgroup population sizes. Without
 `--grid-*` options, ratio mode evaluates just these fixed values.
 
+To use piecewise-constant population sizes, pass boundaries and sizes for
+base, ghost, or both populations:
+
+```sh
+./build/argly --mode ratio --input example.arg \
+  --sample-population 0,0,0,1 --sample-id 0 \
+  --params 500,1000,2000,0.2,0.5,0.5,10000,12000,9000 \
+  --base-boundaries 0,400,2000 --base-sizes 8000,11000 \
+  --ghost-boundaries 0,700,2000 --ghost-sizes 15000,9000 \
+  --output example.profile-ratio.tsv
+```
+
+Each profile needs both lists: K+1 strictly increasing boundaries from 0 to
+`split1`, and K positive sizes, youngest interval first. A coalescence exactly
+at a boundary uses the younger epoch, `(left,right]`. If only one profile is
+given, the other population uses its constant N from `--params`. Base above
+`split1` also keeps the constant `Nbase` from `--params`. The profile can be
+copied from the final `argly-epoch-fit` epoch table; these are separate CLI
+arguments, not `--grid-N-*` axes.
+
+With profiles, `--grid-time` and `--grid-prob` still work. This path evaluates
+each point with the profile-aware scalar likelihood, so it may be slower than
+the constant-N fast grid. `--grid-N-*` cannot be combined with profiles. Its
+TSV omits `N_index` and the constant-N columns, since the curves are fixed
+across all points.
+
 To evaluate a grid, add any `--grid-*` axis, for example:
 
 ```sh
@@ -178,9 +204,16 @@ time grow exponentially with the number of free lineages at split1.
 
 ## Finding the maximum
 
-For a separate estimator with piecewise `Nghost(t)` and optional piecewise `Nbase(t)`, see
-[the independent epoch ECME module](docs/epoch_fit.md). Build it with
-`make build/argly-epoch-fit`; its CLI and caches are separate from the modes below.
+For the separate epoch ECME estimator, see
+[the independent epoch ECME module](docs/epoch_fit.md). It estimates one constant
+size for each population by default; `--base-epochs` and `--ghost-epochs` select
+separate grids balanced by raw coalescence counts across all input trees. Use
+`--epoch-balance expected` for posterior-weighted cuts or `--base-boundaries`
+and `--ghost-boundaries` for manual times. `--epochs` keeps the shared-grid mode.
+Build it with `make build/argly-epoch-fit`; its CLI and caches are separate from
+the modes below. Before fitting, stderr reports raw and expected coalescence
+counts per epoch and an idealized variance proxy `N0² / expected_count` for each
+initial population size. This proxy is not an ECME confidence interval.
 
 The three fit modes maximize the **unweighted sum of log likelihoods across
 all trees** in a single input tree sequence. They build the same scenario

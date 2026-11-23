@@ -143,6 +143,12 @@ namespace treellh
         bool is_skipped = false;
     };
 
+    struct PopulationSizeProfile
+    {
+        std::vector<double> boundaries; // Ascending: 0,...,split1.
+        std::vector<double> sizes; // Epoch (left,right], youngest first.
+    };
+
     class Scenario_Computer
     {
         friend class TreeLikelihoodCache;
@@ -173,6 +179,9 @@ namespace treellh
             double split_2_prop_;
 
             std::vector<double> N_;
+            PopulationSizeProfile base_profile_, ghost_profile_;
+            double inverse_2N_at(int population, double time) const;
+            double integrated_inverse_2N(int population, double upper, double lower) const;
 
             int outgroup_data_index_;
             int admixed_data_index_;
@@ -181,6 +190,7 @@ namespace treellh
             int outgroup_pop_index_ = 2;
         public:
             Scenario_Computer(const tsk_treeseq_t&, std::span<const double>, const std::vector<int>&, int, int);
+            void set_population_profiles(PopulationSizeProfile base, PopulationSizeProfile ghost);
 
             int compute_lower_nodes_split_1(const tsk_tree_t&);
             int compute_fixed_nodes(const tsk_tree_t&);

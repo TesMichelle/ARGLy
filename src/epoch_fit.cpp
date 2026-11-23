@@ -20,8 +20,6 @@ FitResult fit(Ensemble& ensemble, Parameters p, const FitOptions& options) {
         throw std::invalid_argument("starting time/probability outside fit bounds");
     for(double n:p.ghost_sizes) if(n<options.min_size || n>options.max_size) throw std::invalid_argument("starting N outside fit bounds");
     for(double n:p.base_sizes) if(n<options.min_size || n>options.max_size) throw std::invalid_argument("starting base N outside fit bounds");
-    if(!p.base_sizes.empty() && p.base_sizes.size()!=p.ghost_sizes.size())
-        throw std::invalid_argument("base and ghost profiles need the same number of epochs");
     auto apply_sizes=[&]{if(p.base_sizes.empty()) ensemble.set_sizes(p.ghost_sizes);
         else ensemble.set_sizes(p.base_sizes,p.ghost_sizes);};
     apply_sizes();
@@ -41,7 +39,7 @@ FitResult fit(Ensemble& ensemble, Parameters p, const FitOptions& options) {
                 ? std::clamp(expected.exposure[e]/(2*expected.coalescences[e]),options.min_size,options.max_size)
                 : options.max_size;
         }
-        for(size_t e=0;e<p.base_sizes.size();++e) {
+        if(options.fit_base)for(size_t e=0;e<p.base_sizes.size();++e) {
             if(expected.base_exposure[e]==0 && expected.base_coalescences[e]==0) continue;
             p.base_sizes[e]=expected.base_coalescences[e]>0
                 ? std::clamp(expected.base_exposure[e]/(2*expected.base_coalescences[e]),options.min_size,options.max_size)
@@ -69,9 +67,9 @@ FitResult fit(Ensemble& ensemble, Parameters p, const FitOptions& options) {
         } context{ensemble,options,it,0,{tb[0],pb[0]},{tb[1],pb[1]}, {p.time,p.probability},{},current};
         std::vector<double> initial_step;
         double min_epoch=std::numeric_limits<double>::infinity();
-        const auto& boundaries=ensemble.boundaries();
-        for(size_t e=1;e<boundaries.size();++e)
-            min_epoch=std::min(min_epoch,boundaries[e]-boundaries[e-1]);
+        for(const auto* boundaries:{&ensemble.base_boundaries(),&ensemble.boundaries()})
+            for(size_t e=1;e<boundaries->size();++e)
+                min_epoch=std::min(min_epoch,(*boundaries)[e]-(*boundaries)[e-1]);
         for(size_t i=0;i<2;++i) if(context.hi[i]>context.lo[i]) {
             context.active.push_back(i);
             const double natural=i==0?min_epoch/4:0.01;
