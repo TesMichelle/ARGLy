@@ -52,6 +52,78 @@ sizes must lie within `--N-bounds`. Above split1, the ancestral contribution
 still uses fixed Nbase from `--params`; below migration time all lineages use
 the base profile. Split times are fixed.
 
+`--linear-rates` instead fits a separate linear coalescence rate
+`lambda(t)=1/(2N(t))` within each base and ghost epoch. `--base-sizes` and
+`--ghost-sizes` give the starting N at the left edge; the optional
+`--base-right-sizes` and `--ghost-right-sizes` give starting N at the right
+edge. If omitted, right-edge sizes equal left-edge sizes. Both endpoints are
+bounded by `--N-bounds`; adjacent epochs may have different endpoint rates.
+The iteration TSV and `.epochs.tsv` contain both endpoint sizes. At an
+interior time, interpolate the **rate** between endpoints and invert it to
+obtain N. The model above `split1` remains the fixed ancestral Nbase.
+`argly --mode ratio` currently accepts only piecewise-constant size profiles,
+so the linear-rate fit cannot be passed to that CLI as a single N per epoch.
+
+`--movable-cuts` fits two constant sizes and one interior cut in each original
+epoch. The original base and ghost boundaries stay fixed. Optional
+`--base-cuts` and `--ghost-cuts` supply one absolute starting time per epoch;
+otherwise each cut starts at the midpoint. The left size comes from
+`--base-sizes` or `--ghost-sizes`; the right size comes from the corresponding
+`--*-right-sizes` option, defaulting to the left size. This mode is separate
+from `--linear-rates`. The iteration table and `.epochs.tsv` include both sizes
+and the cut time. Within an original epoch, times up to and including the cut
+use `N_left`; later times use `N_right`. The main `argly --mode ratio` CLI does
+not accept movable cuts directly.
+
+`--base-movable-cuts` uses the same two-size cut model for base epochs, while
+each ghost epoch has one constant size. It uses `--base-cuts` and
+`--base-right-sizes`; `--ghost-cuts` and `--ghost-right-sizes` are not accepted.
+The iteration table contains `Nbase_left_*`, `Nbase_right_*`, `base_cut_*`,
+and `Nghost_*`. In `.epochs.tsv`, ghost rows leave `N_right` and `cut_time`
+empty. This flag is separate from `--movable-cuts` and `--linear-rates`.
+
+For a fixed E-step, each candidate cut partitions expected coalescence counts
+and pair exposure. The two bounded size estimates follow `N=E/(2C)` on each
+side. The profiled objective is convex in cumulative exposure between event
+times, so the M-step checks event times and their immediately younger sides
+instead of running a continuous optimizer. A cut can therefore sit extremely
+close to one event; with few events a side often hits an `--N-bounds` limit.
+The E-step stores temporal event masses and pair-exposure spans, which adds
+temporary memory and sorting work. Prefix rebuilding still traverses the
+existing cached steps; if a cut falls inside one step, its exposure integral
+is split analytically at the cut. Tree topology and colouring scenarios are
+not rebuilt when cuts move.
+
+On each cached interval, the number of lineage pairs is constant. The rate
+integral is exact: interval length times the mean of the endpoint rates.
+Prefix recomputation therefore has the same asymptotic work as the constant
+model. The E-step retains posterior event times and two basis-weighted exposure
+components per epoch; the M-step maximizes the resulting concave objective by
+bounded coordinate updates. Its extra work and memory depend on the number of
+events in the selected trees. Linear rates should be compared with the
+constant model using the same trees and grids; it has twice as many fitted
+size parameters per epoch.
+
+A typical run with adaptive cuts, a reproducible migration search, and a
+post-fit smooth curve looks like this (replace the input labels and parameters
+with values appropriate for your tree sequence):
+
+```sh
+./build/argly-epoch-fit --input data.trees \
+  --sample-population 0,0,0,1 \
+  --params 500,1000,2000,0.2,0.5,0.5,10000,12000,9000 \
+  --base-epochs 3 --ghost-epochs 2 \
+  --restarts 20 --restart-seed 5489 --threads 4 \
+  --output fit.tsv --kernel-output fit.kernel.tsv
+```
+
+This writes `fit.tsv` (iterations), `fit.tsv.epochs.tsv` (fitted stepwise sizes
+and information status), and `fit.kernel.tsv` (a descriptive smoothed curve).
+For manually chosen cuts, replace the epoch counts with, for example,
+`--base-boundaries 0,500,1200,2000 --ghost-boundaries 0,800,2000`.
+Use `--threads 1` to compare with the serial tree loops; it does not change
+the fitted model or the number of migration-search restarts.
+
 With separate grids, adaptive boundaries are the default whenever a population
 has more than one epoch and no explicit boundaries. The default
 `--epoch-balance count` counts each coalescence at time `0 < t <= split1`
@@ -138,6 +210,21 @@ format or changes to the existing on-disk cache were introduced. Building scans
 the ARG and reports progress; `--cache-limit-mb` (default 1024 MiB, 0 disables it)
 checks cache array storage before allocation. It does not cap the input tree
 sequence, temporary construction arrays, allocator overhead or total RSS.
+
+Tree-local ECME work uses up to eight CPU threads automatically (or fewer when
+the machine has fewer cores). `--threads K` selects an explicit worker count;
+`--threads 1` runs the tree loops serially. The automatic mode keeps small
+caches serial to avoid thread startup overhead. After each N update, workers
+rebuild prefixes for separate trees; E-step statistics are accumulated in
+worker-local arrays and merged afterward. Candidate migration likelihoods are
+computed independently per tree and summed in tree order. The tree cache is
+shared rather than copied per worker. Random restarts of the migration search
+still run sequentially. Memory-limit checks cover persistent cache arrays, not
+temporary worker data.
+Cache construction also avoids sorting an already time-ordered tree twice;
+each candidate likelihood computes the population and migration log factors
+once before traversing the cached scenarios. These are internal speedups with
+no additional CLI options.
 
 ## Estimation
 

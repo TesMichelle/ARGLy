@@ -191,10 +191,11 @@ parameters have changed. `--estimate-only` still computes the memory estimate
 without loading or building the full scenario statistics.
 
 Default TSV output is `query_index, log_llh`, where `log_llh` is the unweighted
-sum over ALL local trees. `--per-tree` instead writes
+sum over the selected local trees. `--per-tree` instead writes
 `query_index, tree_index, left, right, log_llh` for each query/tree pair.
-`--tree-num` does not subsample cached mode. Preparation, cache construction
-and individual query times are reported separately on stderr. When comparing
+Without `--tree-num`, cached mode uses all local trees. With `--tree-num K`, it
+selects unique trees at K evenly spaced genomic positions. Preparation, cache
+construction and individual query times are reported separately on stderr. When comparing
 against grid mode, make sure the same local trees are evaluated.
 
 Each tree remembers its last migration-time interval. New queries first test
@@ -208,12 +209,22 @@ For the separate epoch ECME estimator, see
 [the independent epoch ECME module](docs/epoch_fit.md). It estimates one constant
 size for each population by default; `--base-epochs` and `--ghost-epochs` select
 separate grids balanced by raw coalescence counts across all input trees. Use
+`--linear-rates` to fit a linear coalescence rate `1/(2N(t))` inside each epoch,
+with separate sizes at its left and right edges. The fitted linear profiles
+are supported by `argly-epoch-fit`, not by the main `argly --mode ratio` CLI. Use
+`--movable-cuts` to fit one interior change point and two constant sizes in
+each original epoch; `--base-movable-cuts` does this only for base epochs and
+fits one constant size per ghost epoch. These modes stay within
+`argly-epoch-fit`. Use
 `--epoch-balance expected` for posterior-weighted cuts or `--base-boundaries`
 and `--ghost-boundaries` for manual times. `--epochs` keeps the shared-grid mode.
 Build it with `make build/argly-epoch-fit`; its CLI and caches are separate from
-the modes below. Before fitting, stderr reports raw and expected coalescence
-counts per epoch and an idealized variance proxy `N0² / expected_count` for each
-initial population size. This proxy is not an ECME confidence interval.
+the modes below. ECME tree loops use CPU threads automatically on larger
+inputs; `--threads K` sets the worker count and `--threads 1` selects serial work.
+Before fitting, stderr reports raw event counts, lineages, lineage time and
+pair time alongside expected coalescence counts per epoch and an idealized
+variance proxy `N0² / expected_count` for each initial population size. This
+proxy is not an ECME confidence interval.
 
 The three fit modes maximize the **unweighted sum of log likelihoods across
 all trees** in a single input tree sequence. They build the same scenario

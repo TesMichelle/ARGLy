@@ -66,10 +66,10 @@ BINARIES := $(BUILD_DIR)/argly $(BUILD_DIR)/main $(BUILD_DIR)/argly-epoch-fit
 all: $(BINARIES)
 
 $(BUILD_DIR)/argly-epoch-fit: $(SRC_DIR)/epoch_cli.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(SRC_DIR)/epoch_model.h $(SRC_DIR)/epoch_fit.h $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
-	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) $(LDFLAGS) -o $@ $(SRC_DIR)/epoch_cli.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(NLOPT_LIBS) $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) -pthread $(LDFLAGS) -o $@ $(SRC_DIR)/epoch_cli.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(NLOPT_LIBS) $(LDLIBS)
 
 $(BUILD_DIR)/epoch_test: $(SRC_DIR)/epoch_test.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(SRC_DIR)/epoch_model.h $(SRC_DIR)/epoch_fit.h $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB)
-	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) $(LDFLAGS) -o $@ $(SRC_DIR)/epoch_test.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(NLOPT_LIBS) $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(COMMON_CPPFLAGS) $(NLOPT_CFLAGS) $(CXXFLAGS) $(CXXSTD) -pthread $(LDFLAGS) -o $@ $(SRC_DIR)/epoch_test.cpp $(SRC_DIR)/epoch_model.cpp $(SRC_DIR)/epoch_fit.cpp $(TREELLH_LIB) $(TSKIT_LIB) $(KASTORE_LIB) $(NLOPT_LIBS) $(LDLIBS)
 
 .PHONY: test-epoch
 test-epoch: $(BUILD_DIR)/epoch_test

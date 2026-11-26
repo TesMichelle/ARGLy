@@ -10,10 +10,19 @@ struct Parameters {
     double time = 0, probability = 0;
     std::vector<double> ghost_sizes;
     std::vector<double> base_sizes; // Empty means fixed Nbase from --params.
+    std::vector<double> ghost_right_sizes, base_right_sizes;
+    std::vector<double> ghost_cuts, base_cuts; // Movable two-step mode only.
+};
+struct RateEvidence {
+    double left_exposure = 0, right_exposure = 0;
+    std::vector<std::pair<double,double>> events; // Position in [0,1], posterior mass.
+    std::vector<std::pair<double,double>> cut_events; // Absolute time, posterior mass.
+    std::vector<std::array<double,3>> spans; // Absolute low/high, posterior pair rate.
 };
 struct Sufficient {
     std::vector<double> exposure, coalescences;
     std::vector<double> base_exposure, base_coalescences;
+    std::vector<RateEvidence> ghost_rates, base_rates;
     double log_likelihood = 0;
 };
 struct LikelihoodDerivatives {
@@ -65,6 +74,18 @@ public:
         size_t base_epochs = 0, const std::vector<double>& base_epoch_boundaries = {});
     void set_sizes(const std::vector<double>&);
     void set_sizes(const std::vector<double>& base, const std::vector<double>& ghost);
+    void set_linear_sizes(const std::vector<double>& base_left,
+        const std::vector<double>& base_right,const std::vector<double>& ghost_left,
+        const std::vector<double>& ghost_right);
+    void set_split_sizes(const std::vector<double>& base_left,const std::vector<double>& base_right,
+        const std::vector<double>& base_cuts,const std::vector<double>& ghost_left,
+        const std::vector<double>& ghost_right,const std::vector<double>& ghost_cuts);
+    void set_split_base_sizes(const std::vector<double>& base_left,
+        const std::vector<double>& base_right,const std::vector<double>& base_cuts,
+        const std::vector<double>& ghost);
+    bool linear_rates() const { return linear_rates_; }
+    // Zero selects automatic thread count; one forces serial evaluation.
+    void set_threads(size_t threads);
     double evaluate(double time, double probability);
     // Observed-likelihood derivatives at fixed N. Requires 0 < probability < 1
     // and time strictly between cached event/epoch boundaries.
@@ -88,9 +109,20 @@ public:
 private:
     std::vector<TreeCache> trees_;
     std::vector<double> boundaries_, base_boundaries_, sizes_, base_sizes_;
+    std::vector<double> right_sizes_, base_right_sizes_;
+    std::vector<double> cuts_, base_cuts_;
     size_t resident_bytes_ = 0;
+    size_t threads_ = 0;
     double base_size_, split2_, split1_;
     bool has_outgroup_ = false;
+    bool linear_rates_ = false;
+    bool split_base_ = false, split_ghost_ = false;
+    void set_profile(const std::vector<double>& base_left,const std::vector<double>& base_right,
+        const std::vector<double>& ghost_left,const std::vector<double>& ghost_right,
+        const std::vector<double>& base_cuts,const std::vector<double>& ghost_cuts,
+        bool linear,bool split_base,bool split_ghost);
+    double rate(size_t pop,size_t epoch,double time) const;
+    double rate_integral(size_t pop,size_t epoch,double low,double high) const;
     size_t locate(TreeCache&, double);
     double partial(const TreeCache&, size_t, size_t, double) const;
     double score(TreeCache&, size_t, size_t, double, double) const;

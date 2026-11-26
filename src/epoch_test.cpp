@@ -25,7 +25,9 @@ int main(){try{
         epochfit::Ensemble ensemble(ts,p,pops,0,1,bins);
         for(double n:{120.,12000.,30000.}){
             ensemble.set_sizes(std::vector<double>(bins,n));p[7]=n;
-            for(double time:{0.,100.,300.,301.,500.,699.,700.,701.,900.,999.})for(double probability:{0.,0.2,0.8,1.}){
+            for(double time:{0.,100.,std::nextafter(300.,0.),300.,std::nextafter(300.,400.),
+                    301.,500.,699.,700.,701.,900.,999.})
+                for(double probability:{0.,1e-10,0.2,0.8,1.-1e-10,1.}){
                 p[0]=time;p[3]=probability;
                 close(ensemble.evaluate(time,probability),legacy.evaluate(p));++comparisons;
             }
@@ -44,6 +46,31 @@ int main(){try{
     p[6]=10000.;
     epochfit::Ensemble ensemble(ts,p,pops,0,1,4);
     const std::vector<double> sizes={5000,8000,13000,20000};ensemble.set_sizes(sizes);
+    epochfit::Ensemble threaded(ts,p,pops,0,1,4);
+    threaded.set_threads(2);
+    threaded.set_sizes(sizes);
+    for(double time:{0.,std::nextafter(300.,0.),300.,std::nextafter(300.,400.),
+            301.,500.,700.,701.,999.})
+        for(double probability:{0.,1e-10,0.2,0.8,1.-1e-10,1.}) {
+            close(threaded.evaluate(time,probability),ensemble.evaluate(time,probability));
+            if(probability==0.2 || probability==0.8) {
+                const auto serial=ensemble.expectation(time,probability);
+                const auto parallel=threaded.expectation(time,probability);
+                close(parallel.log_likelihood,serial.log_likelihood);
+                for(size_t e=0;e<sizes.size();++e) {
+                    close(parallel.exposure[e],serial.exposure[e]);
+                    close(parallel.coalescences[e],serial.coalescences[e]);
+                    close(parallel.base_exposure[e],serial.base_exposure[e]);
+                    close(parallel.base_coalescences[e],serial.base_coalescences[e]);
+                }
+            }
+        }
+    const std::vector<double> changed_base={7000,9000,11000,15000};
+    const std::vector<double> changed_ghost={9000,10000,11000,12000};
+    ensemble.set_sizes(changed_base,changed_ghost);
+    threaded.set_sizes(changed_base,changed_ghost);
+    close(threaded.evaluate(550,0.3),ensemble.evaluate(550,0.3));
+    ensemble.set_sizes(sizes);
     for(double time:{0.,300.,500.,701.,999.}){
         const auto expected=ensemble.expectation(time,0.2);
         close(expected.log_likelihood,ensemble.evaluate(time,0.2));
@@ -63,6 +90,145 @@ int main(){try{
     }
     const std::vector<double> base_sizes={7000,9000,11000,15000};
     ensemble.set_sizes(base_sizes,sizes);
+    {
+        epochfit::Ensemble linear(ts,p,pops,0,1,4);
+        linear.set_linear_sizes(base_sizes,base_sizes,sizes,sizes);
+        for(double time:{300.,500.,701.,999.})
+            close(linear.evaluate(time,0.2),ensemble.evaluate(time,0.2),1e-7);
+        const std::vector<double> base_right={8000,8500,12000,13000};
+        const std::vector<double> ghost_right={7000,9000,11000,18000};
+        linear.set_linear_sizes(base_sizes,base_right,sizes,ghost_right);
+        const double initial=linear.evaluate(550,0.2);
+        const auto evidence=linear.expectation(550,0.2);
+        close(evidence.log_likelihood,initial,1e-8);
+        epochfit::Ensemble linear_parallel(ts,p,pops,0,1,4);
+        linear_parallel.set_threads(2);
+        linear_parallel.set_linear_sizes(base_sizes,base_right,sizes,ghost_right);
+        close(linear_parallel.evaluate(550,0.2),initial,1e-8);
+        const auto parallel_evidence=linear_parallel.expectation(550,0.2);
+        for(size_t e=0;e<4;++e) {
+            close(parallel_evidence.base_rates[e].left_exposure,
+                evidence.base_rates[e].left_exposure,1e-7);
+            close(parallel_evidence.ghost_rates[e].right_exposure,
+                evidence.ghost_rates[e].right_exposure,1e-7);
+        }
+        const auto derivatives=linear.derivatives(550,0.2);
+        close(derivatives.time,
+            (linear.evaluate(550.01,0.2)-linear.evaluate(549.99,0.2))/0.02,1e-6);
+        close(derivatives.probability,
+            (linear.evaluate(550,0.20001)-linear.evaluate(550,0.19999))/0.00002,1e-6);
+        for(size_t e=0;e<4;++e) {
+            close(evidence.base_rates[e].left_exposure+evidence.base_rates[e].right_exposure,
+                evidence.base_exposure[e],1e-7);
+            close(evidence.ghost_rates[e].left_exposure+evidence.ghost_rates[e].right_exposure,
+                evidence.exposure[e],1e-7);
+        }
+        auto trial=base_right;
+        const double eps=1e-5;
+        trial[1]=base_right[1]*std::exp(eps);
+        linear.set_linear_sizes(base_sizes,trial,sizes,ghost_right);
+        const double plus=linear.evaluate(550,0.2);
+        trial[1]=base_right[1]*std::exp(-eps);
+        linear.set_linear_sizes(base_sizes,trial,sizes,ghost_right);
+        const double minus=linear.evaluate(550,0.2);
+        const double lambda=0.5/base_right[1];
+        double event_gradient=0;
+        for(const auto& [z,mass]:evidence.base_rates[1].events)
+            event_gradient+=mass*z/((1-z)*0.5/base_sizes[1]+z*lambda);
+        close((plus-minus)/(2*eps),
+            -lambda*(event_gradient-evidence.base_rates[1].right_exposure),1e-6);
+        epochfit::FitOptions linear_options;
+        linear_options.linear_rates=true;linear_options.time_bounds={550,550};
+        linear_options.probability_bounds={0.2,0.2};linear_options.iterations=4;
+        epochfit::Parameters start{550,0.2,sizes,base_sizes,ghost_right,base_right};
+        double previous_linear=-std::numeric_limits<double>::infinity();
+        linear_options.iteration=[&](size_t,double value,const epochfit::Parameters&,double) {
+            require(value>=previous_linear-1e-8,"linear-rate ECME decreased likelihood");
+            previous_linear=value;
+        };
+        const auto fitted=epochfit::fit(linear,start,linear_options);
+        require(fitted.log_likelihood>=initial-1e-8,"linear-rate fit lost initial likelihood");
+        close(fitted.log_likelihood,linear.evaluate(550,0.2),1e-7);
+    }
+    {
+        epochfit::Ensemble split(ts,p,pops,0,1,4);
+        const std::vector<double> cuts={250,750,1250,1750};
+        split.set_split_sizes(base_sizes,base_sizes,cuts,sizes,sizes,cuts);
+        for(double time:{300.,500.,701.,999.})
+            close(split.evaluate(time,0.2),ensemble.evaluate(time,0.2),1e-7);
+        const std::vector<double> base_right={8000,8500,12000,13000};
+        const std::vector<double> ghost_right={7000,9000,11000,18000};
+        split.set_split_sizes(base_sizes,base_right,cuts,sizes,ghost_right,cuts);
+        const double initial=split.evaluate(550,0.2);
+        const auto evidence=split.expectation(550,0.2);
+        close(initial,evidence.log_likelihood,1e-8);
+        epochfit::Ensemble split_parallel(ts,p,pops,0,1,4);
+        split_parallel.set_threads(2);
+        split_parallel.set_split_sizes(base_sizes,base_right,cuts,sizes,ghost_right,cuts);
+        close(split_parallel.evaluate(550,0.2),initial,1e-8);
+        const auto parallel_evidence=split_parallel.expectation(550,0.2);
+        for(size_t e=0;e<4;++e) {
+            close(parallel_evidence.base_exposure[e],evidence.base_exposure[e],1e-7);
+            close(parallel_evidence.base_coalescences[e],evidence.base_coalescences[e],1e-7);
+        }
+        const auto split_derivatives=split.derivatives(550,0.2);
+        close(split_derivatives.time,
+            (split.evaluate(550.01,0.2)-split.evaluate(549.99,0.2))/0.02,1e-6);
+        bool cut_derivative=false;
+        try{split.derivatives(750,0.2);}
+        catch(const std::invalid_argument&){cut_derivative=true;}
+        require(cut_derivative,"time derivative accepted at movable cut");
+        for(size_t e=0;e<4;++e) {
+            close(evidence.base_rates[e].left_exposure+evidence.base_rates[e].right_exposure,
+                evidence.base_exposure[e],1e-7);
+            close(evidence.ghost_rates[e].left_exposure+evidence.ghost_rates[e].right_exposure,
+                evidence.exposure[e],1e-7);
+        }
+        epochfit::FitOptions split_options;
+        split_options.movable_cuts=true;split_options.time_bounds={550,550};
+        split_options.probability_bounds={0.2,0.2};split_options.iterations=4;
+        epochfit::Parameters start{550,0.2,sizes,base_sizes,ghost_right,base_right,cuts,cuts};
+        double previous_split=-std::numeric_limits<double>::infinity();
+        split_options.iteration=[&](size_t,double value,const epochfit::Parameters& state,double) {
+            require(value>=previous_split-1e-8,"movable-cut ECME decreased likelihood");
+            for(size_t e=0;e<4;++e)
+                require(split.base_boundaries()[e]<state.base_cuts[e]
+                    && state.base_cuts[e]<split.base_boundaries()[e+1],"cut left base epoch");
+            previous_split=value;
+        };
+        const auto fitted=epochfit::fit(split,start,split_options);
+        require(fitted.log_likelihood>=initial-1e-8,"movable-cut fit lost initial likelihood");
+        close(fitted.log_likelihood,split.evaluate(550,0.2),1e-7);
+    }
+    {
+        epochfit::Ensemble mixed(ts,p,pops,0,1,4);
+        const std::vector<double> cuts={250,750,1250,1750};
+        const std::vector<double> base_right={8000,8500,12000,13000};
+        mixed.set_split_base_sizes(base_sizes,base_right,cuts,sizes);
+        epochfit::Ensemble equivalent(ts,p,pops,0,1,4);
+        equivalent.set_split_sizes(base_sizes,base_right,cuts,sizes,sizes,cuts);
+        for(double time:{300.,550.,701.,999.})
+            close(mixed.evaluate(time,0.2),equivalent.evaluate(time,0.2),1e-7);
+        const double initial=mixed.evaluate(550,0.2);
+        const auto evidence=mixed.expectation(550,0.2);
+        close(initial,evidence.log_likelihood,1e-8);
+        require(evidence.ghost_rates.empty(),"base-only cuts retained ghost rate evidence");
+        require(evidence.base_rates.size()==base_sizes.size(),"missing base cut evidence");
+        epochfit::FitOptions options;
+        options.base_movable_cuts=true;options.time_bounds={550,550};
+        options.probability_bounds={0.2,0.2};options.iterations=4;
+        epochfit::Parameters start{550,0.2,sizes,base_sizes,{},base_right,{},cuts};
+        double previous=-std::numeric_limits<double>::infinity();
+        options.iteration=[&](size_t,double value,const epochfit::Parameters& state,double) {
+            require(value>=previous-1e-8,"base-only movable-cut ECME decreased likelihood");
+            require(state.ghost_cuts.empty() && state.ghost_right_sizes.empty(),
+                "base-only movable-cut fit added a ghost cut");
+            previous=value;
+        };
+        const auto fitted=epochfit::fit(mixed,start,options);
+        require(fitted.log_likelihood>=initial-1e-8,"base-only movable-cut fit lost likelihood");
+        close(fitted.log_likelihood,mixed.evaluate(550,0.2),1e-7);
+    }
     for(double time:{0.,300.,500.,701.,999.}) {
         const auto expected=ensemble.expectation(time,0.2);
         close(expected.log_likelihood,ensemble.evaluate(time,0.2));
@@ -95,6 +261,12 @@ int main(){try{
     options.iteration=[&](size_t,double llh,const epochfit::Parameters&,double){require(llh>=previous-1e-8,"ECME decreased likelihood");previous=llh;};
     auto result=epochfit::fit(ensemble,{500,0.2,sizes},options);
     close(result.log_likelihood,ensemble.evaluate(result.parameters.time,result.parameters.probability));
+    auto threaded_options=options;
+    threaded_options.iteration={};
+    const auto threaded_result=epochfit::fit(threaded,{500,0.2,sizes},threaded_options);
+    close(threaded_result.log_likelihood,result.log_likelihood,1e-7);
+    close(threaded_result.parameters.time,result.parameters.time,1e-7);
+    close(threaded_result.parameters.probability,result.parameters.probability,1e-7);
     previous=-std::numeric_limits<double>::infinity();
     auto dual=epochfit::fit(ensemble,{500,0.2,sizes,base_sizes},options);
     close(dual.log_likelihood,ensemble.evaluate(dual.parameters.time,dual.parameters.probability));

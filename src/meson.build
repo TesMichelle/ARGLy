@@ -15,6 +15,7 @@ executable('main',
    install : true)
 
 nlopt_dep = dependency('nlopt', required: false)
+threads_dep = dependency('threads')
 nlopt_inc = []
 if not nlopt_dep.found()
   brew = find_program('brew', required: false)
@@ -37,7 +38,7 @@ cache_test = executable('cache_test', 'cache_test.cpp', dependencies: [treellh_d
 test('likelihood cache', cache_test)
 
 executable('argly-epoch-fit', 'epoch_cli.cpp', 'epoch_model.cpp', 'epoch_fit.cpp',
-  dependencies: [treellh_dep, nlopt_dep], include_directories: nlopt_inc, install: true)
+  dependencies: [treellh_dep, nlopt_dep, threads_dep], include_directories: nlopt_inc, install: true)
 epoch_test = executable('epoch_test', 'epoch_test.cpp', 'epoch_model.cpp', 'epoch_fit.cpp',
-  dependencies: [treellh_dep, nlopt_dep], include_directories: nlopt_inc)
+  dependencies: [treellh_dep, nlopt_dep, threads_dep], include_directories: nlopt_inc)
 test('epoch likelihood and ECME', epoch_test)

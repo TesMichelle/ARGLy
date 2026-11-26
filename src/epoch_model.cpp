@@ -1,12 +1,15 @@
 #include "epoch_model.h"
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numbers>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 
 namespace epochfit {
 namespace {
@@ -33,6 +36,57 @@ size_t tree_storage_bytes(const TreeCache& tree) {
         + tree.epochs.capacity()*sizeof(std::array<size_t,2>)
         + tree.steps.capacity()*sizeof(Step)
         + tree.prefix.capacity()*sizeof(double);
+}
+template<class Cost, class Work>
+void for_trees(const std::vector<TreeCache>& trees,size_t requested,
+                 Cost cost,Work work) {
+    size_t threads=requested;
+    if(!threads) threads=std::min<size_t>(8,std::max(1u,std::thread::hardware_concurrency()));
+    threads=std::min(threads,trees.size());
+    if(threads<2) {
+        for(size_t i=0;i<trees.size();++i)work(0,i);
+        return;
+    }
+    std::vector<size_t> cumulative(trees.size()+1,0);
+    for(size_t i=0;i<trees.size();++i) {
+        const size_t weight=cost(trees[i]);
+        if(weight>std::numeric_limits<size_t>::max()-cumulative[i])
+            throw std::overflow_error("epoch parallel work size overflow");
+        cumulative[i+1]=cumulative[i]+weight;
+    }
+    // For small caches, launching workers costs more than the tree loop.
+    if(!requested && cumulative.back()<3000) {
+        for(size_t i=0;i<trees.size();++i)work(0,i);
+        return;
+    }
+    std::vector<size_t> boundaries(threads+1);
+    boundaries.front()=0;boundaries.back()=trees.size();
+    for(size_t w=1;w<threads;++w) {
+        const size_t target=cumulative.back()/threads*w
+            +(cumulative.back()%threads)*w/threads;
+        const auto first=cumulative.begin()+boundaries[w-1]+1;
+        const auto last=cumulative.end()-(threads-w);
+        boundaries[w]=std::clamp<size_t>(
+            std::lower_bound(first,last,target)-cumulative.begin(),
+            boundaries[w-1]+1,trees.size()-(threads-w));
+    }
+    std::exception_ptr failure;
+    std::mutex failure_mutex;
+    auto run=[&](size_t w) {
+        try {
+            for(size_t i=boundaries[w];i<boundaries[w+1];++i)work(w,i);
+        } catch(...) {
+            std::lock_guard lock(failure_mutex);
+            if(!failure)failure=std::current_exception();
+        }
+    };
+    {
+        std::vector<std::jthread> workers;
+        workers.reserve(threads-1);
+        for(size_t w=1;w<threads;++w)workers.emplace_back(run,w);
+        run(0);
+    }
+    if(failure)std::rethrow_exception(failure);
 }
 }
 
@@ -260,7 +314,9 @@ Ensemble::Ensemble(const tsk_treeseq_t& ts, const std::vector<double>& p,
                 throw std::invalid_argument("epoch model requires binary trees and present-day sample leaves");
         }
         std::sort(nodes.begin(),nodes.end(),[&](auto a,auto b){return ts.tables->nodes.time[a]>ts.tables->nodes.time[b];});
-        helper.sort_by_time(tree); helper.compute_lower_nodes_split_1(tree); helper.compute_fixed_nodes(tree);
+        // These helpers use tree topology and node times directly; the local
+        // event order has already been sorted into nodes above.
+        helper.compute_lower_nodes_split_1(tree); helper.compute_fixed_nodes(tree);
         TreeCache cache;
         cache.impossible=has_outgroup_ && helper.check_imposible_split_2(tree)!=0;
         if (cache.impossible) { trees_.push_back(std::move(cache)); if(progress)progress(visited,ts.num_trees,bytes()); continue; }
@@ -344,29 +400,109 @@ Ensemble::Ensemble(const tsk_treeseq_t& ts, const std::vector<double>& p,
 void Ensemble::set_sizes(const std::vector<double>& sizes) {
     set_sizes(std::vector<double>(base_boundaries_.size()-1,base_size_),sizes);
 }
+void Ensemble::set_threads(size_t threads) {
+    if(threads>64)throw std::invalid_argument("epoch worker count must be at most 64");
+    threads_=threads;
+}
 void Ensemble::set_sizes(const std::vector<double>& base, const std::vector<double>& ghost) {
-    if(base.size()+1!=base_boundaries_.size() || ghost.size()+1!=boundaries_.size())
+    set_profile(base,base,ghost,ghost,{},{},false,false,false);
+}
+void Ensemble::set_linear_sizes(const std::vector<double>& base_left,
+    const std::vector<double>& base_right,const std::vector<double>& ghost_left,
+    const std::vector<double>& ghost_right) {
+    set_profile(base_left,base_right,ghost_left,ghost_right,{},{},true,false,false);
+}
+void Ensemble::set_split_sizes(const std::vector<double>& base_left,
+    const std::vector<double>& base_right,const std::vector<double>& base_cuts,
+    const std::vector<double>& ghost_left,const std::vector<double>& ghost_right,
+    const std::vector<double>& ghost_cuts) {
+    set_profile(base_left,base_right,ghost_left,ghost_right,base_cuts,ghost_cuts,false,true,true);
+}
+void Ensemble::set_split_base_sizes(const std::vector<double>& base_left,
+    const std::vector<double>& base_right,const std::vector<double>& base_cuts,
+    const std::vector<double>& ghost) {
+    set_profile(base_left,base_right,ghost,ghost,base_cuts,{},false,true,false);
+}
+double Ensemble::rate(size_t pop,size_t epoch,double time) const {
+    const auto& left=pop? sizes_:base_sizes_;
+    const auto& right=pop? right_sizes_:base_right_sizes_;
+    if(pop?split_ghost_:split_base_)return time<=(pop?cuts_[epoch]:base_cuts_[epoch])
+        ?0.5/left[epoch]:0.5/right[epoch];
+    if(!linear_rates_)return 0.5/left[epoch];
+    const auto& bounds=pop?boundaries_:base_boundaries_;
+    const double z=std::clamp((time-bounds[epoch])/(bounds[epoch+1]-bounds[epoch]),0.,1.);
+    return (1-z)*(0.5/left[epoch])+z*(0.5/right[epoch]);
+}
+double Ensemble::rate_integral(size_t pop,size_t epoch,double low,double high) const {
+    if(pop?split_ghost_:split_base_) {
+        const double cut=pop?cuts_[epoch]:base_cuts_[epoch];
+        const double left=pop?0.5/sizes_[epoch]:0.5/base_sizes_[epoch];
+        const double right=pop?0.5/right_sizes_[epoch]:0.5/base_right_sizes_[epoch];
+        return (std::min(high,cut)-std::min(low,cut))*left
+            +(std::max(high,cut)-std::max(low,cut))*right;
+    }
+    if(!linear_rates_)
+        return (high-low)*(pop?0.5/sizes_[epoch]:0.5/base_sizes_[epoch]);
+    return (high-low)*0.5*(rate(pop,epoch,low)+rate(pop,epoch,high));
+}
+void Ensemble::set_profile(const std::vector<double>& base,const std::vector<double>& base_right,
+    const std::vector<double>& ghost,const std::vector<double>& ghost_right,
+    const std::vector<double>& base_cuts,const std::vector<double>& ghost_cuts,
+    bool linear,bool split_base,bool split_ghost) {
+    if(base.size()+1!=base_boundaries_.size() || ghost.size()+1!=boundaries_.size()
+        || base_right.size()!=base.size() || ghost_right.size()!=ghost.size())
         throw std::invalid_argument("wrong number of epoch sizes");
     for(double n:base) if(!std::isfinite(n)||n<=0) throw std::invalid_argument("base epoch sizes must be positive and finite");
     for(double n:ghost) if(!std::isfinite(n)||n<=0) throw std::invalid_argument("ghost epoch sizes must be positive and finite");
-    const size_t old_base=base_sizes_.capacity(), old_ghost=sizes_.capacity();
-    base_sizes_=base; sizes_=ghost;
-    resident_bytes_+=(base_sizes_.capacity()-old_base+sizes_.capacity()-old_ghost)*sizeof(double);
-    for(auto& tree:trees_) {
-        if(tree.impossible) continue;
+    for(double n:base_right) if(!std::isfinite(n)||n<=0) throw std::invalid_argument("base right epoch sizes must be positive and finite");
+    for(double n:ghost_right) if(!std::isfinite(n)||n<=0) throw std::invalid_argument("ghost right epoch sizes must be positive and finite");
+    if(linear && (split_base || split_ghost))
+        throw std::invalid_argument("choose linear rates or movable cuts");
+    if(base_cuts.size()!=(split_base?base.size():0)
+        || ghost_cuts.size()!=(split_ghost?ghost.size():0))
+        throw std::invalid_argument("movable cuts need one point per split epoch");
+    if(split_base) {
+        for(size_t e=0;e<base.size();++e)
+            if(!std::isfinite(base_cuts[e]) || !(base_boundaries_[e]<base_cuts[e]
+                && base_cuts[e]<base_boundaries_[e+1]))
+                throw std::invalid_argument("base cut must lie strictly inside its epoch");
+    }
+    if(split_ghost) {
+        for(size_t e=0;e<ghost.size();++e)
+            if(!std::isfinite(ghost_cuts[e]) || !(boundaries_[e]<ghost_cuts[e]
+                && ghost_cuts[e]<boundaries_[e+1]))
+                throw std::invalid_argument("ghost cut must lie strictly inside its epoch");
+    }
+    const size_t old_capacity=base_sizes_.capacity()+sizes_.capacity()
+        +base_right_sizes_.capacity()+right_sizes_.capacity()
+        +base_cuts_.capacity()+cuts_.capacity();
+    base_sizes_=base; sizes_=ghost;linear_rates_=linear;
+    split_base_=split_base;split_ghost_=split_ghost;
+    base_right_sizes_=base_right;right_sizes_=ghost_right;
+    base_cuts_=base_cuts;cuts_=ghost_cuts;
+    resident_bytes_+=(base_sizes_.capacity()+sizes_.capacity()
+        +base_right_sizes_.capacity()+right_sizes_.capacity()
+        +base_cuts_.capacity()+cuts_.capacity()-old_capacity)*sizeof(double);
+    for_trees(trees_,threads_,[](const TreeCache& tree){return tree.prefix.size();},[&](size_t,size_t i) {
+        auto& tree=trees_[i];
+        if(tree.impossible) return;
         std::fill(tree.prefix.begin(),tree.prefix.end(),0);
         for(size_t j=0;j+1<tree.times.size();++j) {
-            const double inv[2]={0.5/base_sizes_[tree.epochs[j][0]],0.5/sizes_[tree.epochs[j][1]]};
+            const double inv[2]={rate(0,tree.epochs[j][0],tree.times[j]),rate(1,tree.epochs[j][1],tree.times[j])};
             const double log_inv[2]={std::log(inv[0]),std::log(inv[1])};
+            const double integrated[2]={
+                rate_integral(0,tree.epochs[j][0],tree.times[j+1],tree.times[j]),
+                rate_integral(1,tree.epochs[j][1],tree.times[j+1],tree.times[j])};
             for(size_t s=0;s<tree.scenarios;++s) {
                 const auto& step=tree.steps[j*tree.scenarios+s];
                 double v=tree.prefix[j*tree.scenarios+s];
                 for(size_t pop=0;pop<2;++pop)
-                    v+=step.coalescences[pop]*log_inv[pop]-pairs(step.lineages[pop])*(tree.times[j]-tree.times[j+1])*inv[pop];
+                    v+=step.coalescences[pop]*log_inv[pop]
+                        -pairs(step.lineages[pop])*integrated[pop];
                 tree.prefix[(j+1)*tree.scenarios+s]=v;
             }
         }
-    }
+    });
 }
 size_t Ensemble::locate(TreeCache& tree,double t) {
     auto contains=[&](size_t i){return i<tree.times.size() && tree.times[i]<=t && (!i || t<tree.times[i-1]);};
@@ -379,10 +515,14 @@ double Ensemble::partial(const TreeCache& tree,size_t s,size_t boundary,double t
     if(tree.times[boundary]==t) return tree.prefix[boundary*tree.scenarios+s];
     const size_t j=boundary-1;
     const auto& step=tree.steps[j*tree.scenarios+s];
-    const double inv[2]={0.5/base_sizes_[tree.epochs[j][0]],0.5/sizes_[tree.epochs[j][1]]};
+    const double inv[2]={rate(0,tree.epochs[j][0],tree.times[j]),rate(1,tree.epochs[j][1],tree.times[j])};
+    const double integrated[2]={
+        rate_integral(0,tree.epochs[j][0],t,tree.times[j]),
+        rate_integral(1,tree.epochs[j][1],t,tree.times[j])};
     double v=tree.prefix[j*tree.scenarios+s];
     for(size_t pop=0;pop<2;++pop)
-        v+=step.coalescences[pop]*std::log(inv[pop])-pairs(step.lineages[pop])*(tree.times[j]-t)*inv[pop];
+        v+=step.coalescences[pop]*std::log(inv[pop])
+            -pairs(step.lineages[pop])*integrated[pop];
     return v;
 }
 double Ensemble::score(TreeCache& tree,size_t s,size_t boundary,double t,double p) const {
@@ -398,13 +538,43 @@ void Ensemble::validate_query(double t,double p) const {
 }
 double Ensemble::evaluate(double t,double p) {
     validate_query(t,p);
-    double value=0;
-    for(auto& tree:trees_) {
-        if(tree.impossible) return neginf;
+    const bool interior=p>0 && p<1;
+    const double log_base=interior?std::log1p(-p):0;
+    const double log_ghost=interior?std::log(p):0;
+    std::vector<double> values(trees_.size());
+    for_trees(trees_,threads_,[](const TreeCache& tree){return tree.scenarios;},[&](size_t,size_t i) {
+        auto& tree=trees_[i];
+        if(tree.impossible) {values[i]=neginf;return;}
         size_t b=locate(tree,t);
+        const size_t j=b-1;
+        const bool exact=tree.times[b]==t;
+        double inv[2]{},log_inv[2]{},integrated[2]{};
+        if(!exact) {
+            inv[0]=rate(0,tree.epochs[j][0],tree.times[j]);
+            inv[1]=rate(1,tree.epochs[j][1],tree.times[j]);
+            log_inv[0]=std::log(inv[0]);
+            log_inv[1]=std::log(inv[1]);
+            integrated[0]=rate_integral(0,tree.epochs[j][0],t,tree.times[j]);
+            integrated[1]=rate_integral(1,tree.epochs[j][1],t,tree.times[j]);
+        }
         double sum=neginf;
-        for(size_t s=0;s<tree.scenarios;++s) sum=add(sum,score(tree,s,b,t,p));
-        value+=tree.root_log_likelihood+tree.prefix[(tree.times.size()-1)*tree.scenarios]-partial(tree,0,b,t)+sum;
+        for(size_t s=0;s<tree.scenarios;++s) {
+            const auto& step=tree.steps[j*tree.scenarios+s];
+            const auto& k=step.lineages;
+            if((p==0 && k[1]) || (p==1 && k[0]))continue;
+            double v=tree.prefix[(exact?b:j)*tree.scenarios+s];
+            if(!exact) for(size_t pop=0;pop<2;++pop)
+                v+=step.coalescences[pop]*log_inv[pop]
+                    -pairs(k[pop])*integrated[pop];
+            if(interior)v+=k[0]*log_base+k[1]*log_ghost;
+            sum=add(sum,v);
+        }
+        values[i]=tree.root_log_likelihood+tree.prefix[(tree.times.size()-1)*tree.scenarios]-partial(tree,0,b,t)+sum;
+    });
+    double value=0;
+    for(double v:values) {
+        if(v==neginf)return neginf;
+        value+=v;
     }
     return value;
 }
@@ -420,8 +590,11 @@ std::vector<LikelihoodDerivatives> Ensemble::derivatives_by_tree(double t,double
         if(tree.times[b]==t)
             throw std::invalid_argument("time derivative undefined at a cached event or epoch boundary");
         const size_t j=b-1;
-        const double inv_base=0.5/base_sizes_[tree.epochs[j][0]];
-        const double inv_ghost=0.5/sizes_[tree.epochs[j][1]];
+        if((split_base_ && t==base_cuts_[tree.epochs[j][0]])
+            || (split_ghost_ && t==cuts_[tree.epochs[j][1]]))
+            throw std::invalid_argument("time derivative undefined at a movable cut");
+        const double inv_base=rate(0,tree.epochs[j][0],t);
+        const double inv_ghost=rate(1,tree.epochs[j][1],t);
         const auto& all=tree.steps[j*tree.scenarios].lineages;
         const double tail_rate=pairs(all[0]+all[1])*inv_base;
         std::vector<double> log_scores(tree.scenarios);
@@ -457,10 +630,17 @@ LikelihoodDerivatives Ensemble::derivatives(double t,double p) {
 }
 Sufficient Ensemble::expectation(double t,double p) {
     validate_query(t,p);
-    Sufficient result;
-    result.exposure.resize(sizes_.size(),0); result.coalescences.resize(sizes_.size(),0);
-    result.base_exposure.resize(base_sizes_.size(),0); result.base_coalescences.resize(base_sizes_.size(),0);
-    for(auto& tree:trees_) {
+    const size_t slots=std::min(trees_.size(),threads_?threads_:size_t(8));
+    std::vector<Sufficient> partials(slots);
+    for(auto& part:partials) {
+        part.exposure.resize(sizes_.size(),0);part.coalescences.resize(sizes_.size(),0);
+        part.base_exposure.resize(base_sizes_.size(),0);part.base_coalescences.resize(base_sizes_.size(),0);
+        if(linear_rates_ || split_ghost_)part.ghost_rates.resize(sizes_.size());
+        if(linear_rates_ || split_base_)part.base_rates.resize(base_sizes_.size());
+    }
+    for_trees(trees_,threads_,[](const TreeCache& tree){return tree.steps.size();},[&](size_t worker,size_t i) {
+        auto& result=partials[worker];
+        auto& tree=trees_[i];
         if(tree.impossible) throw std::runtime_error("cannot fit an impossible tree");
         size_t b=locate(tree,t);
         std::vector<double> weights(tree.scenarios);
@@ -469,16 +649,42 @@ Sufficient Ensemble::expectation(double t,double p) {
         if(!std::isfinite(sum)) throw std::runtime_error("zero likelihood at current parameters; use an interior probability start");
         result.log_likelihood+=tree.root_log_likelihood+tree.prefix[(tree.times.size()-1)*tree.scenarios]-partial(tree,0,b,t)+sum;
         for(auto& w:weights) w=std::exp(w-sum);
+        auto add_rate=[&](size_t pop,size_t e,double low,double high,double pair_mass,double event_mass) {
+            const bool split=pop?split_ghost_:split_base_;
+            if(!linear_rates_ && !split)return;
+            auto& evidence=pop?result.ghost_rates[e]:result.base_rates[e];
+            const auto& bounds=pop?boundaries_:base_boundaries_;
+            const double width=bounds[e+1]-bounds[e];
+            const double zlo=std::clamp((low-bounds[e])/width,0.,1.);
+            const double zhi=std::clamp((high-bounds[e])/width,0.,1.);
+            const double right=pair_mass*(high-low)*(zlo+zhi)*0.5;
+            evidence.right_exposure+=right;
+            evidence.left_exposure+=pair_mass*(high-low)-right;
+            if(event_mass>0) {
+                if(linear_rates_)evidence.events.emplace_back(zhi,event_mass);
+                if(split)evidence.cut_events.emplace_back(high,event_mass);
+            }
+            if(split && pair_mass>0 && high>low)
+                evidence.spans.push_back({low,high,pair_mass});
+        };
         for(size_t j=0;j<b;++j) {
             const double dt=tree.times[j]-std::max(t,tree.times[j+1]);
             const auto e=tree.epochs[j];
+            std::array<double,2> pair_mass{},event_mass{};
             for(size_t s=0;s<tree.scenarios;++s) {
                 const auto& step=tree.steps[j*tree.scenarios+s];
                 result.exposure[e[1]]+=weights[s]*pairs(step.lineages[1])*dt;
                 result.coalescences[e[1]]+=weights[s]*step.coalescences[1];
                 result.base_exposure[e[0]]+=weights[s]*pairs(step.lineages[0])*dt;
                 result.base_coalescences[e[0]]+=weights[s]*step.coalescences[0];
+                if(linear_rates_ || split_base_ || split_ghost_)for(size_t pop=0;pop<2;++pop) {
+                    pair_mass[pop]+=weights[s]*pairs(step.lineages[pop]);
+                    event_mass[pop]+=weights[s]*step.coalescences[pop];
+                }
             }
+            if(linear_rates_ || split_base_ || split_ghost_)for(size_t pop=0;pop<2;++pop)
+                add_rate(pop,e[pop],std::max(t,tree.times[j+1]),tree.times[j],
+                    pair_mass[pop],event_mass[pop]);
         }
         // Below migration all colourings have joined the base population.
         // These intervals are the scenario-independent tail used by evaluate().
@@ -486,12 +692,40 @@ Sufficient Ensemble::expectation(double t,double p) {
             const size_t j=b-1, e=tree.epochs[j][0];
             const auto& step=tree.steps[j*tree.scenarios];
             result.base_exposure[e]+=pairs(step.lineages[0])*(t-tree.times[b]);
+            add_rate(0,e,tree.times[b],t,pairs(step.lineages[0]),0);
         }
         for(size_t j=b;j+1<tree.times.size();++j) {
             const size_t e=tree.epochs[j][0];
             const auto& step=tree.steps[j*tree.scenarios];
             result.base_exposure[e]+=pairs(step.lineages[0])*(tree.times[j]-tree.times[j+1]);
             result.base_coalescences[e]+=step.coalescences[0];
+            add_rate(0,e,tree.times[j+1],tree.times[j],pairs(step.lineages[0]),step.coalescences[0]);
+        }
+    });
+    Sufficient result=std::move(partials[0]);
+    for(size_t w=1;w<partials.size();++w) {
+        const auto& part=partials[w];
+        result.log_likelihood+=part.log_likelihood;
+        for(size_t e=0;e<result.exposure.size();++e) {
+            result.exposure[e]+=part.exposure[e];
+            result.coalescences[e]+=part.coalescences[e];
+        }
+        for(size_t e=0;e<result.base_exposure.size();++e) {
+            result.base_exposure[e]+=part.base_exposure[e];
+            result.base_coalescences[e]+=part.base_coalescences[e];
+        }
+        if(linear_rates_ || split_base_ || split_ghost_) {
+            auto merge=[&](std::vector<RateEvidence>& to,const std::vector<RateEvidence>& from) {
+                for(size_t e=0;e<to.size();++e) {
+                    to[e].left_exposure+=from[e].left_exposure;
+                    to[e].right_exposure+=from[e].right_exposure;
+                    to[e].events.insert(to[e].events.end(),from[e].events.begin(),from[e].events.end());
+                    to[e].cut_events.insert(to[e].cut_events.end(),from[e].cut_events.begin(),from[e].cut_events.end());
+                    to[e].spans.insert(to[e].spans.end(),from[e].spans.begin(),from[e].spans.end());
+                }
+            };
+            merge(result.base_rates,part.base_rates);
+            merge(result.ghost_rates,part.ghost_rates);
         }
     }
     return result;

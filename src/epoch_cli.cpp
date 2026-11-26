@@ -43,6 +43,8 @@ void help() {
         "--epoch-boundaries CSV: K+1 increasing shared times; requires --epochs\n"
         "--ghost-sizes CSV: starting Nghost per epoch, youngest first (default: params Nghost)\n"
         "--base-sizes CSV: starting Nbase per base epoch, youngest first (default: params Nbase)\n"
+        "--base-right-sizes CSV --ghost-right-sizes CSV: second N in linear/split modes\n"
+        "--base-cuts CSV --ghost-cuts CSV: starting interior cut times for the selected cut mode\n"
         "--fit-base: accepted for compatibility; base fitting is now the default\n"
         "--fixed-base: keep supplied Nbase(t) fixed during fitting\n"
         "--fixed-ghost: keep supplied Nghost(t) fixed during fitting (default: estimate it)\n"
@@ -50,6 +52,10 @@ void help() {
         "--time-bounds LO,HI --prob-bounds LO,HI --N-bounds LO,HI\n"
         "  defaults: [0,split2) with outgroup, [0,split1) without; [0.000001,0.999999], [100,10000000]\n"
         "--iterations K (30) --restarts K (10 random starts per migration search)\n"
+        "--threads K (automatic by default; 1 runs tree loops serially)\n"
+        "--linear-rates: fit 1/(2N(t)) linearly within each epoch (separate endpoint sizes)\n"
+        "--movable-cuts: fit two constant sizes and one movable cut inside each epoch\n"
+        "--base-movable-cuts: movable cuts in base epochs; constant N per ghost epoch\n"
         "--maxeval K (100 per restart) --restart-seed K (5489; reproducible starts)\n"
         "--tolerance X (1e-5 absolute log likelihood)\n"
         "--tree-num K: equally spaced genomic probes, deduplicated (default: all trees)\n"
@@ -65,9 +71,11 @@ void help() {
 int main(int argc,char** argv) {
     try {
         std::string input,output,profile_output,kernel_output;std::vector<double> p,initial_sizes,initial_base,epoch_boundaries;
+        std::vector<double> initial_base_right,initial_ghost_right;
+        std::vector<double> initial_base_cuts,initial_ghost_cuts;
         std::vector<double> explicit_base_boundaries,explicit_ghost_boundaries;
         std::vector<int> populations;size_t epochs=1,base_epochs=1,shared_epochs=0,tree_limit=0;
-        int admixed=0,outgroup=1;double memory_limit=1024;
+        int admixed=0,outgroup=1;double memory_limit=1024;size_t threads=0;
         double kernel_bandwidth=0;size_t kernel_points=201;
         bool kernel_bandwidth_specified=false,kernel_points_specified=false;
         bool evaluate=false,has_time_bounds=false,fit_base=true,fit_base_requested=false,fixed_base_requested=false;
@@ -94,6 +102,10 @@ int main(int argc,char** argv) {
             else if(arg=="--params")p=numbers(value());
             else if(arg=="--ghost-sizes")initial_sizes=numbers(value());
             else if(arg=="--base-sizes")initial_base=numbers(value());
+            else if(arg=="--ghost-right-sizes")initial_ghost_right=numbers(value());
+            else if(arg=="--base-right-sizes")initial_base_right=numbers(value());
+            else if(arg=="--ghost-cuts")initial_ghost_cuts=numbers(value());
+            else if(arg=="--base-cuts")initial_base_cuts=numbers(value());
             else if(arg=="--fit-base") {fit_base=true;fit_base_requested=true;}
             else if(arg=="--fixed-base") {fit_base=false;fixed_base_requested=true;}
             else if(arg=="--fixed-ghost")options.fit_ghost=false;
@@ -111,6 +123,10 @@ int main(int argc,char** argv) {
             else if(arg=="--tree-num")tree_limit=count(value());
             else if(arg=="--iterations")options.iterations=count(value());
             else if(arg=="--restarts")options.restarts=count(value());
+            else if(arg=="--threads")threads=count(value());
+            else if(arg=="--linear-rates")options.linear_rates=true;
+            else if(arg=="--movable-cuts")options.movable_cuts=true;
+            else if(arg=="--base-movable-cuts")options.base_movable_cuts=true;
             else if(arg=="--maxeval")options.max_evaluations=count(value());
             else if(arg=="--restart-seed")options.restart_seed=seed(value());
             else if(arg=="--tolerance")options.tolerance=std::stod(value());
@@ -130,6 +146,9 @@ int main(int argc,char** argv) {
             throw std::invalid_argument("--epoch-balance applies only to separate population grids");
         if(fit_base_requested && fixed_base_requested)
             throw std::invalid_argument("--fit-base conflicts with --fixed-base");
+        if((options.linear_rates && (options.movable_cuts || options.base_movable_cuts))
+            || (options.movable_cuts && options.base_movable_cuts))
+            throw std::invalid_argument("choose one of --linear-rates, --movable-cuts, --base-movable-cuts");
         if(shared_epochs)epochs=base_epochs=shared_epochs;
         if(base_boundaries_requested) {
             if(explicit_base_boundaries.size()<2)throw std::invalid_argument("--base-boundaries needs at least two values");
@@ -164,6 +183,19 @@ int main(int argc,char** argv) {
         if(initial_sizes.size()!=epochs)throw std::invalid_argument("--ghost-sizes needs one value per epoch");
         if(initial_base.empty())initial_base.assign(base_epochs,p[6]);
         if(initial_base.size()!=base_epochs)throw std::invalid_argument("--base-sizes needs one value per base epoch");
+        if(!options.linear_rates && !options.movable_cuts && !options.base_movable_cuts
+            && (!initial_base_right.empty() || !initial_ghost_right.empty()))
+            throw std::invalid_argument("right-end sizes require --linear-rates or --movable-cuts");
+        if(!options.movable_cuts && !options.base_movable_cuts
+            && (!initial_base_cuts.empty() || !initial_ghost_cuts.empty()))
+            throw std::invalid_argument("interior cuts require --movable-cuts");
+        if(options.base_movable_cuts && (!initial_ghost_cuts.empty() || !initial_ghost_right.empty()))
+            throw std::invalid_argument("--base-movable-cuts has no ghost cut or right size");
+        if(initial_base_right.empty())initial_base_right=initial_base;
+        if(initial_ghost_right.empty() && !options.base_movable_cuts)initial_ghost_right=initial_sizes;
+        if(initial_base_right.size()!=base_epochs
+            || (!options.base_movable_cuts && initial_ghost_right.size()!=epochs))
+            throw std::invalid_argument("right-end sizes need one value per epoch");
         options.fit_base=fit_base;
         std::ofstream file;
         if(!output.empty()) {file.open(output);if(!file)throw std::runtime_error("cannot open output file");}
@@ -216,7 +248,25 @@ int main(int argc,char** argv) {
                 int bucket=total?int(10.*done/total)*10:100;
                 if(bucket>last) {last=bucket;std::cerr<<"Epoch cache: "<<bucket<<"% (scanned "<<done<<"/"<<total<<" trees), "<<bytes/(1024.*1024.)<<" MiB\n";}
             },ghost_boundaries,base_epochs,base_boundaries);
-        ensemble.set_sizes(initial_base,initial_sizes);
+        ensemble.set_threads(threads);
+        if(options.movable_cuts || options.base_movable_cuts) {
+            auto defaults=[](const std::vector<double>& bounds) {
+                std::vector<double> cuts;
+                for(size_t e=0;e+1<bounds.size();++e)
+                    cuts.push_back(bounds[e]+(bounds[e+1]-bounds[e])*0.5);
+                return cuts;
+            };
+            if(initial_base_cuts.empty())initial_base_cuts=defaults(ensemble.base_boundaries());
+            if(options.movable_cuts && initial_ghost_cuts.empty())
+                initial_ghost_cuts=defaults(ensemble.boundaries());
+        }
+        if(options.linear_rates)ensemble.set_linear_sizes(initial_base,initial_base_right,
+            initial_sizes,initial_ghost_right);
+        else if(options.movable_cuts)ensemble.set_split_sizes(initial_base,initial_base_right,
+            initial_base_cuts,initial_sizes,initial_ghost_right,initial_ghost_cuts);
+        else if(options.base_movable_cuts)ensemble.set_split_base_sizes(
+            initial_base,initial_base_right,initial_base_cuts,initial_sizes);
+        else ensemble.set_sizes(initial_base,initial_sizes);
         std::cerr<<"Cache ready: selected trees="<<ensemble.tree_count()<<" scenarios="<<ensemble.scenario_count()
             <<" resident arrays="<<ensemble.bytes()/(1024.*1024.)<<" MiB; peak RSS="<<rss()<<" MiB; seconds="
             <<std::chrono::duration<double>(Clock::now()-start).count()<<'\n';
@@ -262,17 +312,42 @@ int main(int argc,char** argv) {
         std::cerr<<"Idealized variance uses N0^2/expected_C (SD=N0/sqrt(expected_C)); "
             <<"it is not a confidence interval and ignores latent-colouring and tree dependence.\n";
         out<<"iteration\tlog_llh\tT_adm\tp\timprovement";
-        for(size_t e=0;e<base_epochs;++e)out<<"\tNbase_"<<e;
-        for(size_t e=0;e<epochs;++e)out<<"\tNghost_"<<e;
+        for(size_t e=0;e<base_epochs;++e) {
+            out<<((options.linear_rates || options.movable_cuts || options.base_movable_cuts)
+                ?"\tNbase_left_":"\tNbase_")<<e;
+            if(options.linear_rates || options.movable_cuts || options.base_movable_cuts)
+                out<<"\tNbase_right_"<<e;
+            if(options.movable_cuts || options.base_movable_cuts)out<<"\tbase_cut_"<<e;
+        }
+        for(size_t e=0;e<epochs;++e) {
+            out<<((options.linear_rates || options.movable_cuts)?"\tNghost_left_":"\tNghost_")<<e;
+            if(options.linear_rates || options.movable_cuts)out<<"\tNghost_right_"<<e;
+            if(options.movable_cuts)out<<"\tghost_cut_"<<e;
+        }
         out<<'\n';
         options.iteration=[&](size_t it,double llh,const epochfit::Parameters& state,double gain){
             out<<it<<'\t'<<llh<<'\t'<<state.time<<'\t'<<state.probability<<'\t'<<gain;
-            for(double n:state.base_sizes)out<<'\t'<<n;
-            for(double n:state.ghost_sizes)out<<'\t'<<n;out<<'\n';out.flush();
+            for(size_t e=0;e<state.base_sizes.size();++e) {
+                out<<'\t'<<state.base_sizes[e];
+                if(options.linear_rates || options.movable_cuts || options.base_movable_cuts)
+                    out<<'\t'<<state.base_right_sizes[e];
+                if(options.movable_cuts || options.base_movable_cuts)out<<'\t'<<state.base_cuts[e];
+            }
+            for(size_t e=0;e<state.ghost_sizes.size();++e) {
+                out<<'\t'<<state.ghost_sizes[e];
+                if(options.linear_rates || options.movable_cuts)out<<'\t'<<state.ghost_right_sizes[e];
+                if(options.movable_cuts)out<<'\t'<<state.ghost_cuts[e];
+            }
+            out<<'\n';out.flush();
             std::cerr<<"ECME "<<it<<": log_llh="<<llh<<" improvement="<<gain<<" T_adm="<<state.time<<" p="<<state.probability;
             std::cerr<<" Nbase=";for(double n:state.base_sizes)std::cerr<<n<<',';
+            if(options.linear_rates || options.movable_cuts || options.base_movable_cuts) {std::cerr<<" Nbase_right=";
+                for(double n:state.base_right_sizes)std::cerr<<n<<',';}
             std::cerr<<" Nghost=";
-            for(double n:state.ghost_sizes)std::cerr<<n<<',';std::cerr<<'\n';
+            for(double n:state.ghost_sizes)std::cerr<<n<<',';
+            if(options.linear_rates || options.movable_cuts) {std::cerr<<" Nghost_right=";
+                for(double n:state.ghost_right_sizes)std::cerr<<n<<',';}
+            std::cerr<<'\n';
         };
         options.optimizer=[&](size_t it,size_t calls,double best){
             const size_t budget=options.max_evaluations*options.restarts;
@@ -281,6 +356,14 @@ int main(int argc,char** argv) {
                     <<options.restarts<<" restarts, best="<<best<<'\n';
         };
         epochfit::Parameters state{p[0],p[3],initial_sizes,initial_base};
+        if(options.linear_rates || options.movable_cuts || options.base_movable_cuts) {
+            if(!options.base_movable_cuts)state.ghost_right_sizes=initial_ghost_right;
+            state.base_right_sizes=initial_base_right;
+        }
+        if(options.movable_cuts || options.base_movable_cuts) {
+            if(options.movable_cuts)state.ghost_cuts=initial_ghost_cuts;
+            state.base_cuts=initial_base_cuts;
+        }
         if(evaluate) options.iteration(0,ensemble.evaluate(state.time,state.probability),state,0);
         else {
             const auto result=epochfit::fit(ensemble,state,options);
@@ -296,19 +379,62 @@ int main(int argc,char** argv) {
                 if(ensemble.boundaries()[e+1]<=state.time)status="below_migration";
                 else if(!options.fit_ghost)status="fixed";
                 else if(expected.exposure[e]==0 && expected.coalescences[e]==0)status="no_information";
-                else if(state.ghost_sizes[e]==options.max_size)status="upper_bound";
-                else if(state.ghost_sizes[e]==options.min_size)status="lower_bound";
+                else if(state.ghost_sizes[e]==options.max_size
+                    || ((options.linear_rates || options.movable_cuts)
+                        && state.ghost_right_sizes[e]==options.max_size))status="upper_bound";
+                else if(state.ghost_sizes[e]==options.min_size
+                    || ((options.linear_rates || options.movable_cuts)
+                        && state.ghost_right_sizes[e]==options.min_size))status="lower_bound";
                 return status;
             };
             auto base_status=[&](size_t e) {
                 std::string status="active";
                 if(!options.fit_base)status="fixed";
                 else if(expected.base_exposure[e]==0 && expected.base_coalescences[e]==0)status="no_information";
-                else if(state.base_sizes[e]==options.max_size)status="upper_bound";
-                else if(state.base_sizes[e]==options.min_size)status="lower_bound";
+                else if(state.base_sizes[e]==options.max_size
+                    || ((options.linear_rates || options.movable_cuts || options.base_movable_cuts)
+                        && state.base_right_sizes[e]==options.max_size))status="upper_bound";
+                else if(state.base_sizes[e]==options.min_size
+                    || ((options.linear_rates || options.movable_cuts || options.base_movable_cuts)
+                        && state.base_right_sizes[e]==options.min_size))status="lower_bound";
                 return status;
             };
-            if(shared_epochs) {
+            if(options.base_movable_cuts) {
+                profile<<"population\tepoch\tleft_time\tright_time\tN_left\tN_right\tcut_time"
+                    <<"\texpected_coalescences\texposure\tstatus\n";
+                for(size_t e=0;e<base_epochs;++e)
+                    profile<<"base\t"<<e<<'\t'<<ensemble.base_boundaries()[e]
+                        <<'\t'<<ensemble.base_boundaries()[e+1]<<'\t'<<state.base_sizes[e]
+                        <<'\t'<<state.base_right_sizes[e]<<'\t'<<state.base_cuts[e]
+                        <<'\t'<<expected.base_coalescences[e]
+                        <<'\t'<<expected.base_exposure[e]<<'\t'<<base_status(e)<<'\n';
+                for(size_t e=0;e<epochs;++e)
+                    profile<<"ghost\t"<<e<<'\t'<<ensemble.boundaries()[e]
+                        <<'\t'<<ensemble.boundaries()[e+1]<<'\t'<<state.ghost_sizes[e]
+                        <<"\t\t\t"<<expected.coalescences[e]
+                        <<'\t'<<expected.exposure[e]<<'\t'<<ghost_status(e)<<'\n';
+            } else if(options.linear_rates || options.movable_cuts) {
+                profile<<"population\tepoch\tleft_time\tright_time\tN_left\tN_right";
+                if(options.movable_cuts)profile<<"\tcut_time";
+                profile
+                    <<"\texpected_coalescences\texposure\tstatus\n";
+                for(size_t e=0;e<base_epochs;++e) {
+                    profile<<"base\t"<<e<<'\t'<<ensemble.base_boundaries()[e]
+                        <<'\t'<<ensemble.base_boundaries()[e+1]<<'\t'<<state.base_sizes[e]
+                        <<'\t'<<state.base_right_sizes[e];
+                    if(options.movable_cuts)profile<<'\t'<<state.base_cuts[e];
+                    profile<<'\t'<<expected.base_coalescences[e]
+                        <<'\t'<<expected.base_exposure[e]<<'\t'<<base_status(e)<<'\n';
+                }
+                for(size_t e=0;e<epochs;++e) {
+                    profile<<"ghost\t"<<e<<'\t'<<ensemble.boundaries()[e]
+                        <<'\t'<<ensemble.boundaries()[e+1]<<'\t'<<state.ghost_sizes[e]
+                        <<'\t'<<state.ghost_right_sizes[e];
+                    if(options.movable_cuts)profile<<'\t'<<state.ghost_cuts[e];
+                    profile<<'\t'<<expected.coalescences[e]
+                        <<'\t'<<expected.exposure[e]<<'\t'<<ghost_status(e)<<'\n';
+                }
+            } else if(shared_epochs) {
                 profile<<"epoch\tleft_time\tright_time\tNbase\tbase_expected_coalescences\tbase_exposure\tbase_status"
                     <<"\tNghost\texpected_coalescences\texposure\tstatus\n";
                 for(size_t e=0;e<epochs;++e) {

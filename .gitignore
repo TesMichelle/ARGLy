@@ -87,3 +87,6 @@ ARGLy.code-workspace
 
 # data
 *.arg
+
+# Local handoff notes for the next coding agent
+/README_AGENT_HANDOFF.md
