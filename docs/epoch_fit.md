@@ -39,6 +39,40 @@ For the repository's prepared 1000-tree benchmark, the tested command is:
   --output /private/tmp/epoch-fit.tsv
 ```
 
+For several tree sequences with the same model parameters and sample-node
+population map, use a numbered prefix:
+
+```sh
+./build/argly-epoch-fit --path data --prefix chromosome_ --sim-count 50 \
+  --sample-population 0,0,0,1 \
+  --params 500,1000,2000,0.2,0.5,0.5,10000,12000,9000 \
+  --tree-num 10000 --base-epochs 3 --ghost-epochs 5 \
+  --output pooled-fit.tsv
+```
+
+This reads `data/chromosome_0.trees` through `data/chromosome_49.trees`.
+`--path` is optional: `--prefix data/chromosome_ --sim-count 50` names the same
+files. The `.trees` suffix is the default; `--suffix` changes it if the files use
+another name. The suffix does not determine the file format: each input must
+still be a tskit tree sequence. `--input` and the numbered batch options are
+mutually exclusive. All files use the same `--sample-population` list indexed
+by sample node ID and must agree on whether outgroup samples are present.
+Only one input tree sequence is loaded at a time while building the combined
+cache. The fit then treats the selected trees as one ensemble and reports a
+single likelihood, parameter set and epoch profile.
+
+In batch mode, `--tree-num K` is the total tree budget. It selects
+`floor(K / file_count)` distinct, evenly spaced **tree indices** per file and
+one extra index in each of the first `K % file_count` files. For 50 files and
+`--tree-num 10000`, this is 200 trees per file, provided every file contains
+at least 200 trees. A shorter file contributes all its trees, so the actual
+total can then be below K. `K` must be at least the number of files. Without
+`--tree-num`, all local trees of every file are used. The cache memory limit
+applies to the combined
+cache. Raw diagnostics and default count-balanced epoch boundaries still scan
+all local trees of all files; expected-balanced boundaries use the combined
+selected-tree ensemble.
+
 `--params` uses the existing nine-value order. Without grid options, the model
 estimates one constant Nbase and one constant Nghost on `[0,split1]`. Use
 `--base-epochs K` and `--ghost-epochs L` independently to estimate K and L
@@ -167,10 +201,13 @@ and does not bound migration time. The allowed range is then `0 <= T_adm < split
 including when `--time-bounds` is omitted. With outgroup samples, the usual
 `0 <= T_adm < split2` condition remains.
 
-`--tree-num K` selects trees containing the midpoints of K equal genomic windows,
-with repeated trees counted once. If K is at least the number of trees, all trees
-are used. Omitting this option also selects all trees. Scores are unweighted sums
-of local tree log likelihoods, as in the existing fit modes.
+With `--input`, `--tree-num K` selects trees containing the midpoints of K
+equal genomic windows, with repeated trees counted once. If K is at least the
+number of trees, all trees are used. With numbered files, K is divided among
+files and selects tree indices as described above. Omitting this option selects
+all trees from every input.
+Scores are unweighted sums of local tree log likelihoods, as in the existing
+fit modes.
 
 `--evaluate-only` evaluates a supplied curve without fitting. `--time-bounds` and
 `--prob-bounds` can fix a variable by specifying equal endpoints. Starts must lie
@@ -182,14 +219,19 @@ are supported, but EM can get stuck with zero posterior weights there.
 
 1. Each selected tree has a common descending array of boundaries: internal node
    times, split times and the union of both population grids. Each interval
-   records the base and ghost epoch indices independently. Each colouring stores the
-   coalescence counts at the upper boundary and the two lineage counts on the
-   interval below it. The current `Step` record occupies 16 bytes. Durations and
-   epoch indices are shared across colourings.
-2. Each colouring stores one accumulated log likelihood at each boundary, before
-   that boundary's coalescence. This costs another 8 bytes per record and is rebuilt
-   when either N curve changes. Moving migration time uses the neighbouring
-   cached values and the partial interval; it does not rebuild the cache.
+   records the base and ghost epoch indices independently. Total lineages and
+   coalescences are stored once per boundary; each colouring stores only its
+   ghost counts. Base counts are recovered by subtraction. The ghost counts
+   use one, two or four bytes each according to the number of samples, so the
+   common case of at most 255 samples uses two bytes per colouring and boundary.
+   Durations and epoch indices are shared across colourings.
+2. Each colouring stores accumulated log likelihood only at the boundaries
+   reachable by `--time-bounds`, plus the adjacent boundary needed for partial
+   intervals. Above this range, the contributions are accumulated into the
+   first stored prefix; below it, only the scenario-zero tail is accumulated.
+   Prefixes are rebuilt when either N curve changes. Moving migration time
+   within the specified bounds uses the neighbouring cached values and the
+   partial interval; it does not rebuild the cache.
 
 Intervals at a vertex/epoch boundary use the younger epoch's N for a coalescence
 exactly on that boundary: event epochs have convention `(left_time,right_time]`.

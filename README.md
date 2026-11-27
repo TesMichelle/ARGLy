@@ -11,7 +11,8 @@ Preferred simple build: GNU Make, C/C++ compilers, and NLopt with its C++ header
 make
 ```
 
-This builds `build/argly` and `build/main`. The Makefile also builds bundled
+This builds `build/argly`, `build/argly-epoch-fit`, and `build/main`.
+The Makefile also builds bundled
 `tskit` and `kastore` from `src/subprojects/tskit-1.0.0`; if that directory is
 missing, it unpacks `src/subprojects/packagecache/tskit-1.0.0.tar.xz`, or
 downloads the same archive as a fallback.
@@ -114,8 +115,9 @@ The columns are `tree_index`, `left`, `right`, `log_base`, `log_ghost`, and
 `log_ratio = log_base - log_ghost` (base divided by ghost). `left` and `right`
 identify the genomic interval of each tree. If `--output` is omitted for a
 single input file, the TSV is printed to standard output. For batch files,
-use `--path DIR --prefix PREFIX --sim-count N [--suffix .arg]`; each input
-gets its own `.ratio.tsv` file.
+use `--path DIR --prefix PREFIX --sim-count N`; each input gets its own ratio
+TSV. The main `argly` batch suffix defaults to `.arg`; pass `--suffix .trees`
+for `.trees` inputs.
 With a grid, there is one TSV row per tree and grid point. The row includes
 `time_index`, `N_index`, `prob_index`, the corresponding parameter values,
 and the same three log likelihood columns.
@@ -226,8 +228,20 @@ pair time alongside expected coalescence counts per epoch and an idealized
 variance proxy `N0² / expected_count` for each initial population size. This
 proxy is not an ECME confidence interval.
 
+The ECME cache stores compact scenario counts and retains scenario likelihood
+prefixes only near the allowed migration-time range. Narrow `--time-bounds`
+can therefore substantially reduce memory without changing the likelihood.
+For several tree sequences, `argly-epoch-fit --path DIR --prefix NAME
+--sim-count F` reads `DIR/NAME0.trees` through `DIR/NAME(F-1).trees` and fits
+one model to their selected trees. In this mode, `--tree-num K` is a total
+tree budget divided as evenly as possible among files; for example, 50 files
+and `K=10000` give 200 evenly spaced tree indices per file. The input tree
+sequences are loaded one at a time, while the combined scenario cache remains
+in memory.
+See [the epoch module documentation](docs/epoch_fit.md) for batch details.
+
 The three fit modes maximize the **unweighted sum of log likelihoods across
-all trees** in a single input tree sequence. They build the same scenario
+all selected trees** from the input tree sequence or batch. They build the same scenario
 cache as `--mode cached`, so use `--estimate-only` or `--cache-limit-mb` when
 checking memory. The optimized parameters are migration time, migration
 probability, `Nbase`, and `Nghost`. Both split times and `Noutgroup` come from

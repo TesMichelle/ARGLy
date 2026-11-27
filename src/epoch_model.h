@@ -2,6 +2,7 @@
 #include <treellh.h>
 #include <array>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -57,12 +58,19 @@ struct Step {
 struct TreeCache {
     std::vector<double> times; // Descending, shared by all colourings, includes epoch boundaries.
     std::vector<std::array<size_t, 2>> epochs; // Base and ghost epoch for each interval.
-    std::vector<Step> steps; // Boundary-major; events at the upper endpoint, lineages below it.
-    std::vector<double> prefix; // Log likelihood just ABOVE each event, rebuilt when N changes.
+    std::vector<std::array<unsigned, 2>> totals; // Scenario-independent lineages and events.
+    std::vector<unsigned char> ghost_steps; // Boundary-major ghost counts, two values per scenario.
+    unsigned count_bytes = 1;
+    std::vector<double> prefix; // Only rows reachable by the migration-time bounds.
+    size_t prefix_first = 0, prefix_last = 0; // Inclusive row indices.
+    double tail_prefix = 0; // Scenario-zero prefix at time zero.
     size_t scenarios = 0;
     size_t cursor = 0;
     double root_log_likelihood = 0;
     bool impossible = false;
+    Step step(size_t boundary, size_t scenario) const;
+    void set_step(size_t boundary, size_t scenario, const Step& value);
+    double prefix_at(size_t boundary, size_t scenario) const;
 };
 class Ensemble {
 public:
@@ -71,7 +79,15 @@ public:
         size_t epochs, size_t tree_limit = 0, double memory_limit_mb = 0,
         const std::function<void(size_t,size_t,size_t)>& progress = {},
         const std::vector<double>& epoch_boundaries = {},
-        size_t base_epochs = 0, const std::vector<double>& base_epoch_boundaries = {});
+        size_t base_epochs = 0, const std::vector<double>& base_epoch_boundaries = {},
+        std::array<double,2> time_bounds = {0, std::numeric_limits<double>::infinity()},
+        bool even_tree_indices = false);
+    // Append independently selected trees; call set_sizes again before evaluating.
+    void append(const tsk_treeseq_t&, const std::vector<double>&,
+        const std::vector<int>& populations, int admixed, int outgroup,
+        size_t tree_limit = 0, double memory_limit_mb = 0,
+        const std::function<void(size_t,size_t,size_t)>& progress = {},
+        bool even_tree_indices = false);
     void set_sizes(const std::vector<double>&);
     void set_sizes(const std::vector<double>& base, const std::vector<double>& ghost);
     void set_linear_sizes(const std::vector<double>& base_left,
@@ -114,6 +130,8 @@ private:
     size_t resident_bytes_ = 0;
     size_t threads_ = 0;
     double base_size_, split2_, split1_;
+    std::array<double,2> time_bounds_{};
+    int admixed_index_ = 0, outgroup_index_ = 1;
     bool has_outgroup_ = false;
     bool linear_rates_ = false;
     bool split_base_ = false, split_ghost_ = false;

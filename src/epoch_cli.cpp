@@ -2,10 +2,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <sys/resource.h>
@@ -35,6 +38,8 @@ double rss() {rusage u{};getrusage(RUSAGE_SELF,&u);
 void help() {
     std::cout << "Piecewise Nbase(t) and Nghost(t) ECME fit.\n"
         "argly-epoch-fit --input FILE --sample-population CSV --params CSV [options]\n"
+        "argly-epoch-fit --prefix PREFIX --sim-count N --sample-population CSV --params CSV [options]\n"
+        "  Batch files: PREFIX0.trees ... PREFIX(N-1).trees; --path DIR and --suffix are optional\n"
         "--params mt,split2,split1,mp,split2p,split1p,Nbase,Nghost,Noutgroup\n"
         "--base-epochs K --ghost-epochs K: separate grids (default: 1 each)\n"
         "--epoch-balance count|expected: adaptive boundaries by raw counts (default) or posterior expectations\n"
@@ -58,7 +63,7 @@ void help() {
         "--base-movable-cuts: movable cuts in base epochs; constant N per ghost epoch\n"
         "--maxeval K (100 per restart) --restart-seed K (5489; reproducible starts)\n"
         "--tolerance X (1e-5 absolute log likelihood)\n"
-        "--tree-num K: equally spaced genomic probes, deduplicated (default: all trees)\n"
+        "--tree-num K: one file uses genomic probes; batch divides K tree indices evenly among files\n"
         "--admixed-index I (0) --outgroup-index I (1)\n"
         "--cache-limit-mb X (1024 MiB, 0 unlimited); checked before allocating each tree\n"
         "--evaluate-only: evaluate supplied parameters without fitting\n"
@@ -67,10 +72,19 @@ void help() {
         "--kernel-output FILE: posterior-weighted Gaussian N(t) after fitting\n"
         "--kernel-bandwidth X (default: split1/50) --kernel-points K (201)\n";
 }
+template<class Work> void with_tree_sequence(const std::string& path,Work work) {
+    tsk_treeseq_t ts{};
+    const int ret=tsk_treeseq_load(&ts,path.c_str(),0);
+    if(ret<0)throw std::runtime_error("cannot load "+path+": "+tsk_strerror(ret));
+    struct Cleanup {tsk_treeseq_t& ts;~Cleanup(){tsk_treeseq_free(&ts);}} cleanup{ts};
+    work(ts);
+}
 }
 int main(int argc,char** argv) {
     try {
-        std::string input,output,profile_output,kernel_output;std::vector<double> p,initial_sizes,initial_base,epoch_boundaries;
+        std::string input,path,prefix="arg",suffix=".trees",output,profile_output,kernel_output;
+        size_t sim_count=0;
+        std::vector<double> p,initial_sizes,initial_base,epoch_boundaries;
         std::vector<double> initial_base_right,initial_ghost_right;
         std::vector<double> initial_base_cuts,initial_ghost_cuts;
         std::vector<double> explicit_base_boundaries,explicit_ghost_boundaries;
@@ -90,6 +104,10 @@ int main(int argc,char** argv) {
             auto bounds=[&](){auto v=numbers(value());if(v.size()!=2)throw std::invalid_argument("bounds need LO,HI");return std::array<double,2>{v[0],v[1]};};
             if(arg=="--help" || arg=="-h") {help();return 0;}
             else if(arg=="--input")input=value();
+            else if(arg=="--path")path=value();
+            else if(arg=="--prefix")prefix=value();
+            else if(arg=="--suffix")suffix=value();
+            else if(arg=="--sim-count")sim_count=count(value());
             else if(arg=="--output")output=value();
             else if(arg=="--profile-output")profile_output=value();
             else if(arg=="--kernel-output")kernel_output=value();
@@ -139,7 +157,28 @@ int main(int argc,char** argv) {
             else if(arg=="--evaluate-only")evaluate=true;
             else throw std::invalid_argument("unknown option: "+arg);
         }
-        if(input.empty() || p.size()!=9 || populations.empty())throw std::invalid_argument("require --input, --params (9 values), and --sample-population");
+        if(p.size()!=9 || populations.empty())
+            throw std::invalid_argument("require --params (9 values) and --sample-population");
+        if((!input.empty())==(sim_count!=0) || (!input.empty() && !path.empty()))
+            throw std::invalid_argument("provide --input FILE or --prefix PREFIX --sim-count N");
+        std::vector<std::string> inputs;
+        if(!input.empty())inputs.push_back(input);
+        else {
+            if(prefix.empty() || suffix.empty())throw std::invalid_argument("batch prefix and suffix must be nonempty");
+            inputs.reserve(sim_count);
+            for(size_t i=0;i<sim_count;++i)
+                inputs.push_back((std::filesystem::path(path.empty()?".":path)
+                    /(prefix+std::to_string(i)+suffix)).string());
+        }
+        for(const auto& source:inputs)
+            if(!std::filesystem::is_regular_file(source))
+                throw std::invalid_argument("input tree sequence is missing: "+source);
+        if(tree_limit && tree_limit<inputs.size())
+            throw std::invalid_argument("--tree-num must be at least the number of input files");
+        auto file_tree_limit=[&](size_t i) {
+            return tree_limit?tree_limit/inputs.size()+(i<tree_limit%inputs.size()):size_t(0);
+        };
+        const bool even_tree_indices=sim_count!=0;
         if(shared_epochs && separate_epochs_requested)
             throw std::invalid_argument("--epochs cannot be combined with separate population grids");
         if(shared_epochs && balance_requested)
@@ -169,9 +208,20 @@ int main(int argc,char** argv) {
         if(epoch_boundaries_requested && epoch_boundaries.size()!=shared_epochs+1)
             throw std::invalid_argument("--epoch-boundaries needs K+1 values");
         if(profile_output.empty() && !output.empty())profile_output=output+".epochs.tsv";
-        if(!output.empty() && (output==input || output==profile_output))throw std::invalid_argument("input, iteration output and profile output must have different paths");
-        if(!profile_output.empty() && profile_output==input)throw std::invalid_argument("profile output must differ from input");
-        if(!kernel_output.empty() && (kernel_output==input || kernel_output==output || kernel_output==profile_output))
+        auto same_path=[](const std::string& a,const std::string& b) {
+            if(a.empty() || b.empty())return false;
+            if(std::filesystem::absolute(a).lexically_normal()
+                ==std::filesystem::absolute(b).lexically_normal())return true;
+            std::error_code error;
+            return std::filesystem::equivalent(a,b,error) && !error;
+        };
+        for(const auto& source:inputs)
+            if(same_path(output,source) || same_path(profile_output,source)
+                || same_path(kernel_output,source))
+                throw std::invalid_argument("output path must differ from every input file");
+        if(same_path(output,profile_output))
+            throw std::invalid_argument("iteration output and profile output must differ");
+        if(!kernel_output.empty() && (same_path(kernel_output,output) || same_path(kernel_output,profile_output)))
             throw std::invalid_argument("kernel output must differ from input and other outputs");
         if(kernel_output.empty() && (kernel_bandwidth_specified || kernel_points_specified))
             throw std::invalid_argument("kernel settings require --kernel-output");
@@ -201,16 +251,15 @@ int main(int argc,char** argv) {
         if(!output.empty()) {file.open(output);if(!file)throw std::runtime_error("cannot open output file");}
         std::ostream& out=output.empty()?std::cout:file;
         out<<std::setprecision(17);std::cerr<<std::setprecision(12);
-        tsk_treeseq_t ts{};
-        int ret=tsk_treeseq_load(&ts,input.c_str(),0);
-        if(ret<0)throw std::runtime_error(tsk_strerror(ret));
-        struct Cleanup {tsk_treeseq_t& ts;~Cleanup(){tsk_treeseq_free(&ts);}} cleanup{ts};
         if(!has_time_bounds) {
-            bool has_outgroup=false;
-            const auto* samples=tsk_treeseq_get_samples(&ts);
-            for(size_t i=0;i<tsk_treeseq_get_num_samples(&ts);++i)
-                if(size_t(samples[i])<populations.size() && populations[samples[i]]==outgroup) {has_outgroup=true;break;}
-            options.time_bounds={0,std::nextafter(p[has_outgroup?1:2],0.)};
+            with_tree_sequence(inputs.front(),[&](const tsk_treeseq_t& source) {
+                bool has_outgroup=false;
+                const auto* samples=tsk_treeseq_get_samples(&source);
+                for(size_t i=0;i<tsk_treeseq_get_num_samples(&source);++i)
+                    if(size_t(samples[i])<populations.size() && populations[samples[i]]==outgroup)
+                        {has_outgroup=true;break;}
+                options.time_bounds={0,std::nextafter(p[has_outgroup?1:2],0.)};
+            });
         }
         using Clock=std::chrono::steady_clock;
         auto start=Clock::now();
@@ -220,21 +269,36 @@ int main(int argc,char** argv) {
             && ((epochs>1 && ghost_boundaries.empty()) || (base_epochs>1 && base_boundaries.empty()));
         if(choose_boundaries) {
             if(balance=="expected") {
-                int pilot_last=-1;
-                epochfit::Ensemble pilot(ts,p,populations,admixed,outgroup,1,tree_limit,memory_limit,
-                    [&](size_t done,size_t total,size_t bytes){
-                        int bucket=total?int(10.*done/total)*10:100;
-                        if(bucket>pilot_last) {pilot_last=bucket;std::cerr<<"Balanced-grid pilot: "<<bucket
-                            <<"% (scanned "<<done<<"/"<<total<<" trees), "<<bytes/(1024.*1024.)<<" MiB\n";}
+                std::optional<epochfit::Ensemble> pilot;
+                for(size_t i=0;i<inputs.size();++i)
+                    with_tree_sequence(inputs[i],[&](const tsk_treeseq_t& next) {
+                        if(i==0)pilot.emplace(next,p,populations,admixed,outgroup,1,
+                            file_tree_limit(i),memory_limit,
+                            std::function<void(size_t,size_t,size_t)>{},
+                            std::vector<double>{},0,std::vector<double>{},
+                            std::array<double,2>{p[0],p[0]},even_tree_indices);
+                        else pilot->append(next,p,populations,admixed,outgroup,
+                            file_tree_limit(i),memory_limit,{},even_tree_indices);
                     });
-                const auto masses=pilot.coalescence_masses(p[0],p[3]);
+                if(inputs.size()>1)pilot->set_sizes(std::vector<double>(1,p[7]));
+                const auto masses=pilot->coalescence_masses(p[0],p[3]);
                 if(base_boundaries.empty() && base_epochs>1)
                     base_boundaries=epochfit::balanced_epoch_boundaries(masses[0],base_epochs,p[2]);
                 if(ghost_boundaries.empty() && epochs>1)
                     ghost_boundaries=epochfit::balanced_epoch_boundaries(masses[1],epochs,p[2]);
             } else {
-                const auto raw_counts=epochfit::raw_coalescence_counts(ts,p[2]);
-                std::cerr<<"Counted coalescences in all "<<ts.num_trees<<" input trees at "
+                std::map<double,double> combined;
+                size_t scanned=0;
+                for(size_t i=0;i<inputs.size();++i) {
+                    auto collect=[&](const tsk_treeseq_t& source) {
+                        scanned+=source.num_trees;
+                        for(const auto& [time,mass]:epochfit::raw_coalescence_counts(source,p[2]))
+                            combined[time]+=mass;
+                    };
+                    with_tree_sequence(inputs[i],collect);
+                }
+                const std::vector<std::pair<double,double>> raw_counts(combined.begin(),combined.end());
+                std::cerr<<"Counted coalescences in all "<<scanned<<" input trees at "
                     <<raw_counts.size()<<" distinct times\n";
                 if(base_boundaries.empty() && base_epochs>1)
                     base_boundaries=epochfit::balanced_epoch_boundaries(raw_counts,base_epochs,p[2]);
@@ -242,12 +306,38 @@ int main(int argc,char** argv) {
                     ghost_boundaries=epochfit::balanced_epoch_boundaries(raw_counts,epochs,p[2]);
             }
         }
-        int last=-1;
-        epochfit::Ensemble ensemble(ts,p,populations,admixed,outgroup,epochs,tree_limit,memory_limit,
-            [&](size_t done,size_t total,size_t bytes){
-                int bucket=total?int(10.*done/total)*10:100;
-                if(bucket>last) {last=bucket;std::cerr<<"Epoch cache: "<<bucket<<"% (scanned "<<done<<"/"<<total<<" trees), "<<bytes/(1024.*1024.)<<" MiB\n";}
-            },ghost_boundaries,base_epochs,base_boundaries);
+        auto progress=[&](size_t file_index) {
+            return [&,file_index,last=-1](size_t done,size_t total,size_t bytes) mutable {
+                const int bucket=total?int(10.*done/total)*10:100;
+                if(bucket>last) {
+                    last=bucket;
+                    std::cerr<<"Epoch cache file "<<file_index+1<<'/'<<inputs.size()<<": "<<bucket
+                        <<"% (scanned "<<done<<'/'<<total<<" trees), "
+                        <<bytes/(1024.*1024.)<<" MiB total\n";
+                }
+            };
+        };
+        std::optional<epochfit::Ensemble> pooled;
+        std::array<std::vector<epochfit::RawEpochStatistics>,2> raw_information;
+        size_t raw_tree_count=0;
+        for(size_t i=0;i<inputs.size();++i)
+            with_tree_sequence(inputs[i],[&](const tsk_treeseq_t& next) {
+                if(i==0)pooled.emplace(next,p,populations,admixed,outgroup,epochs,
+                    file_tree_limit(i),memory_limit,progress(i),ghost_boundaries,
+                    base_epochs,base_boundaries,options.time_bounds,even_tree_indices);
+                else pooled->append(next,p,populations,admixed,outgroup,
+                    file_tree_limit(i),memory_limit,progress(i),even_tree_indices);
+                const auto part=epochfit::raw_epoch_statistics(
+                    next,pooled->base_boundaries(),pooled->boundaries());
+                raw_tree_count+=next.num_trees;
+                if(i==0)raw_information=part;
+                else for(size_t q=0;q<2;++q)for(size_t e=0;e<raw_information[q].size();++e) {
+                        raw_information[q][e].coalescences+=part[q][e].coalescences;
+                        raw_information[q][e].lineage_time+=part[q][e].lineage_time;
+                        raw_information[q][e].pair_time+=part[q][e].pair_time;
+                    }
+            });
+        auto& ensemble=*pooled;
         ensemble.set_threads(threads);
         if(options.movable_cuts || options.base_movable_cuts) {
             auto defaults=[](const std::vector<double>& bounds) {
@@ -272,10 +362,8 @@ int main(int argc,char** argv) {
             <<std::chrono::duration<double>(Clock::now()-start).count()<<'\n';
         std::cerr<<"Base boundaries (youngest first):";for(double b:ensemble.base_boundaries())std::cerr<<' '<<b;std::cerr<<'\n';
         std::cerr<<"Ghost boundaries (youngest first):";for(double b:ensemble.boundaries())std::cerr<<' '<<b;std::cerr<<'\n';
-        const auto raw_information=epochfit::raw_epoch_statistics(
-            ts,ensemble.base_boundaries(),ensemble.boundaries());
         const auto initial_expected=ensemble.expectation(p[0],p[3]);
-        std::cerr<<"Initial epoch information (raw columns: all "<<ts.num_trees
+        std::cerr<<"Initial epoch information (raw columns: all "<<raw_tree_count
             <<" input trees, uncoloured; expected C: "<<ensemble.tree_count()
             <<" fitted trees at initial parameters):\n"
             <<"population\tepoch\t(left,right]\traw_C\traw_mean_K\traw_lineage_time"
@@ -289,7 +377,7 @@ int main(int argc,char** argv) {
                 const double c=expected_counts[e];
                 const double sd=c>0?sizes[e]/std::sqrt(c):std::numeric_limits<double>::infinity();
                 const double mean_k=raw[e].lineage_time/
-                    (double(ts.num_trees)*(boundaries[e+1]-boundaries[e]));
+                    (double(raw_tree_count)*(boundaries[e+1]-boundaries[e]));
                 std::cerr<<name<<'\t'<<e<<"\t("<<boundaries[e]<<','<<boundaries[e+1]
                     <<"]\t"<<raw[e].coalescences<<'\t'<<mean_k<<'\t'
                     <<raw[e].lineage_time<<'\t'<<raw[e].pair_time<<'\t'

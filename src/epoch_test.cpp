@@ -451,6 +451,30 @@ int main(){try{
         && two_grid_result.log_likelihood>=two_grid_initial-1e-8,
         "two-grid ECME changed dimensions or decreased likelihood");
     ensemble.set_sizes(sizes);
+    epochfit::Ensemble pooled(ts,p,pops,0,1,4,1);
+    pooled.append(ts,p,pops,0,1,1);
+    pooled.set_sizes(sizes);
+    epochfit::Ensemble one_selected(ts,p,pops,0,1,4,1);
+    one_selected.set_sizes(sizes);
+    require(pooled.tree_count()==2*one_selected.tree_count(),"appended tree count is wrong");
+    close(pooled.evaluate(500,0.2),2*one_selected.evaluate(500,0.2));
+    const auto pooled_expected=pooled.expectation(500,0.2);
+    const auto single_expected=one_selected.expectation(500,0.2);
+    for(size_t e=0;e<sizes.size();++e) {
+        close(pooled_expected.exposure[e],2*single_expected.exposure[e]);
+        close(pooled_expected.coalescences[e],2*single_expected.coalescences[e]);
+    }
+    epochfit::Ensemble bounded(ts,p,pops,0,1,4,0,0,{}, {},0,{}, {300,700});
+    bounded.set_sizes(sizes);
+    require(bounded.bytes()<ensemble.bytes(),"bounded prefixes did not save memory");
+    for(double time:{300.,400.,500.,699.,700.}) {
+        close(bounded.evaluate(time,0.2),ensemble.evaluate(time,0.2));
+        close(bounded.expectation(time,0.2).log_likelihood,
+            ensemble.expectation(time,0.2).log_likelihood);
+    }
+    bool outside_bounds=false;
+    try {bounded.evaluate(701,0.2);}catch(const std::invalid_argument&){outside_bounds=true;}
+    require(outside_bounds,"bounded prefix cache accepted a time outside its range");
     bool rejected=false;try{epochfit::Ensemble limited(ts,p,pops,0,1,4,0,0.0001);}catch(const std::runtime_error&){rejected=true;}
     require(rejected,"memory limit ignored");
     size_t last_reported=0;
@@ -493,6 +517,24 @@ int main(){try{
     try {epochfit::Ensemble invalid(ts,p,{0,0},0,1,4,0,0,{}, {0,200,200,600,2000});}
     catch(const std::invalid_argument&){boundaries_rejected=true;}
     require(boundaries_rejected,"duplicate epoch boundary accepted");
+    tsk_treeseq_free(&ts);tsk_table_collection_free(&tables);
+    // A 256-sample tree requires the two-byte count representation.
+    check(tsk_table_collection_init(&tables,0));tables.sequence_length=1;
+    for(int i=0;i<256;++i)
+        check(tsk_node_table_add_row(&tables.nodes,TSK_NODE_IS_SAMPLE,0,TSK_NULL,TSK_NULL,nullptr,0));
+    for(int i=1;i<256;++i)
+        check(tsk_node_table_add_row(&tables.nodes,0,i,TSK_NULL,TSK_NULL,nullptr,0));
+    for(int i=1;i<256;++i) {
+        const int parent=255+i;
+        check(tsk_edge_table_add_row(&tables.edges,0,1,parent,i==1?0:parent-1,nullptr,0));
+        check(tsk_edge_table_add_row(&tables.edges,0,1,parent,i,nullptr,0));
+    }
+    check(tsk_table_collection_sort(&tables,nullptr,0));
+    check(tsk_treeseq_init(&ts,&tables,TSK_TS_INIT_BUILD_INDEXES));
+    p={50,100,300,0.2,0.5,0.5,10000,12000,9000};
+    epochfit::Ensemble wide_counts(ts,p,std::vector<int>(256,0),0,1,2,
+        0,0,{}, {},0,{}, {50,50});
+    require(std::isfinite(wide_counts.evaluate(50,0.2)),"two-byte count cache gave nonfinite likelihood");
     tsk_treeseq_free(&ts);tsk_table_collection_free(&tables);
     std::cout<<"Passed "<<comparisons<<" constant-N comparisons, two-population score derivatives, M-step and ECME monotonicity, memory guard\n";
     return 0;
