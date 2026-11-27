@@ -12,6 +12,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <sys/resource.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 namespace {
 std::vector<double> numbers(const std::string& s) {
@@ -33,6 +38,26 @@ double rss() {rusage u{};getrusage(RUSAGE_SELF,&u);
     return u.ru_maxrss/(1024.*1024.);
 #else
     return u.ru_maxrss/1024.;
+#endif
+}
+double current_rss() {
+#ifdef __APPLE__
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count=MACH_TASK_BASIC_INFO_COUNT;
+    if(task_info(mach_task_self(),MACH_TASK_BASIC_INFO,
+        reinterpret_cast<task_info_t>(&info),&count)!=KERN_SUCCESS)
+        throw std::runtime_error("cannot read current RSS");
+    return info.resident_size/(1024.*1024.);
+#elif defined(__linux__)
+    std::ifstream statm("/proc/self/statm");
+    size_t total_pages=0,resident_pages=0;
+    if(!(statm>>total_pages>>resident_pages))
+        throw std::runtime_error("cannot read current RSS");
+    const long page_size=sysconf(_SC_PAGESIZE);
+    if(page_size<=0)throw std::runtime_error("cannot read page size");
+    return static_cast<double>(resident_pages)*page_size/(1024.*1024.);
+#else
+    return rss();
 #endif
 }
 void help() {
@@ -338,6 +363,10 @@ int main(int argc,char** argv) {
                     }
             });
         auto& ensemble=*pooled;
+        std::cerr<<"Cache built: selected trees="<<ensemble.tree_count()
+            <<" scenarios="<<ensemble.scenario_count()
+            <<" resident arrays="<<ensemble.bytes()/(1024.*1024.)
+            <<" MiB; current RSS="<<current_rss()<<" MiB; peak RSS="<<rss()<<" MiB\n";
         ensemble.set_threads(threads);
         if(options.movable_cuts || options.base_movable_cuts) {
             auto defaults=[](const std::vector<double>& bounds) {
@@ -357,8 +386,10 @@ int main(int argc,char** argv) {
         else if(options.base_movable_cuts)ensemble.set_split_base_sizes(
             initial_base,initial_base_right,initial_base_cuts,initial_sizes);
         else ensemble.set_sizes(initial_base,initial_sizes);
-        std::cerr<<"Cache ready: selected trees="<<ensemble.tree_count()<<" scenarios="<<ensemble.scenario_count()
-            <<" resident arrays="<<ensemble.bytes()/(1024.*1024.)<<" MiB; peak RSS="<<rss()<<" MiB; seconds="
+        std::cerr<<"Cache ready: selected trees="<<ensemble.tree_count()
+            <<" scenarios="<<ensemble.scenario_count()
+            <<" resident arrays="<<ensemble.bytes()/(1024.*1024.)
+            <<" MiB; current RSS="<<current_rss()<<" MiB; peak RSS="<<rss()<<" MiB; seconds="
             <<std::chrono::duration<double>(Clock::now()-start).count()<<'\n';
         std::cerr<<"Base boundaries (youngest first):";for(double b:ensemble.base_boundaries())std::cerr<<' '<<b;std::cerr<<'\n';
         std::cerr<<"Ghost boundaries (youngest first):";for(double b:ensemble.boundaries())std::cerr<<' '<<b;std::cerr<<'\n';
