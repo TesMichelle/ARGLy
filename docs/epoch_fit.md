@@ -338,7 +338,8 @@ kernel uses only available exposure and events, so the effective neighbourhood
 is asymmetric. The output is a conditional descriptive estimate under the
 fitted stepwise model, not a new ECME optimum. `--evaluate-only` also supports
 this output using the supplied parameters.
-Stderr reports cache progress and two memory checkpoints: `Cache built` after
+At startup, stderr lists every input tree-sequence path in processing order.
+It then reports cache progress and two memory checkpoints: `Cache built` after
 all selected trees have been cached, and `Cache ready` after the first full
 prefix calculation. Both show cache array size, current process RSS, and peak
 RSS in MiB. It also reports each migration search, outer iterations, final

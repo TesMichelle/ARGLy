@@ -276,6 +276,9 @@ int main(int argc,char** argv) {
         if(!output.empty()) {file.open(output);if(!file)throw std::runtime_error("cannot open output file");}
         std::ostream& out=output.empty()?std::cout:file;
         out<<std::setprecision(17);std::cerr<<std::setprecision(12);
+        std::cerr<<"Input tree sequences ("<<inputs.size()<<"):\n";
+        for(size_t i=0;i<inputs.size();++i)
+            std::cerr<<"  ["<<i+1<<'/'<<inputs.size()<<"] "<<inputs[i]<<'\n';
         if(!has_time_bounds) {
             with_tree_sequence(inputs.front(),[&](const tsk_treeseq_t& source) {
                 bool has_outgroup=false;
